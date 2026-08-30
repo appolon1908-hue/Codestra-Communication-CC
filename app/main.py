@@ -1,12 +1,17 @@
+import os
 from enum import StrEnum
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-app = FastAPI(title="Codestra Communication API", version="0.1.0")
+from .db import get_session
+from .models import MessageModel, SuppressionModel
 
-EXTERNAL_DELIVERY_ENABLED = False
+app = FastAPI(title="Codestra Communication API", version="0.2.0")
+EXTERNAL_DELIVERY_ENABLED = os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").lower() == "true"
 
 class Channel(StrEnum):
     EMAIL = "email"
@@ -26,6 +31,7 @@ class Message(BaseModel):
     status: str
     channel: Channel
     template_key: str
+    model_config = {"from_attributes": True}
 
 @app.get("/health")
 def health() -> dict[str, object]:
@@ -33,18 +39,21 @@ def health() -> dict[str, object]:
 
 @app.get("/v1/capabilities")
 def capabilities() -> dict[str, object]:
-    return {
-        "email": True,
-        "sms": True,
-        "whatsapp": True,
-        "push": True,
-        "consent_enforcement": True,
-        "suppression_enforcement": True,
-        "external_delivery": EXTERNAL_DELIVERY_ENABLED,
-    }
+    return {"email": True, "sms": True, "whatsapp": True, "push": True, "consent_enforcement": True, "suppression_enforcement": True, "external_delivery": EXTERNAL_DELIVERY_ENABLED}
 
 @app.post("/v1/messages", response_model=Message, status_code=status.HTTP_202_ACCEPTED)
-def create_message(body: MessageCreate) -> Message:
+async def create_message(body: MessageCreate, session: AsyncSession = Depends(get_session)) -> MessageModel:
+    existing = await session.execute(select(MessageModel).where(MessageModel.tenant_id == body.tenant_id, MessageModel.idempotency_key == body.idempotency_key))
+    row = existing.scalar_one_or_none()
+    if row is not None:
+        return row
+    suppressed = await session.execute(select(SuppressionModel).where(SuppressionModel.tenant_id == body.tenant_id, SuppressionModel.channel == body.channel.value, SuppressionModel.recipient == body.recipient))
+    if suppressed.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="recipient_suppressed")
+    row = MessageModel(**body.model_dump(mode="json"), status="accepted_delivery_disabled" if not EXTERNAL_DELIVERY_ENABLED else "queued")
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
     if EXTERNAL_DELIVERY_ENABLED:
         raise HTTPException(status_code=501, detail="provider_delivery_not_implemented")
-    return Message(id=uuid4(), status="accepted_delivery_disabled", channel=body.channel, template_key=body.template_key)
+    return row
