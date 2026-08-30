@@ -1,0 +1,6 @@
+[project]
+name = "codestra-communication"
+version = "0.1.0"
+description = "Codestra customer communications control plane"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.116,<1", "uvicorn[standard]>=0.35,<1", "pydantic>=2.11,<3"]
