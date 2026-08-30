@@ -1,13 +1,6 @@
-from app.models import Message, Consent, Suppression
+from app.models import ConsentModel, MessageModel, SuppressionModel
 
 
-def test_message_tenant_boundary():
-    assert Message.__table__.columns["tenant_id"].nullable is False
-
-
-def test_consent_tenant_boundary():
-    assert Consent.__table__.columns["tenant_id"].nullable is False
-
-
-def test_suppression_tenant_boundary():
-    assert Suppression.__table__.columns["tenant_id"].nullable is False
+def test_all_communication_records_have_required_tenant_boundaries():
+    for model in (MessageModel, ConsentModel, SuppressionModel):
+        assert model.__table__.columns["tenant_id"].nullable is False
