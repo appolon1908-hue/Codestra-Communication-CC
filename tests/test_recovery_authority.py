@@ -31,12 +31,18 @@ def test_source_contract_is_encrypted_isolated_and_schema_aware():
     assert "pg_dump" in BACKUP and "--format=custom" in BACKUP
     assert "gpg --batch" in BACKUP and "shred -u" in BACKUP
     assert "sha256sum database.dump.gpg METADATA >SHA256SUMS" in BACKUP
+    assert "POSTGRES_DSN" not in BACKUP + RESTORE
+    assert 'sync "$work/database.dump.gpg"' in BACKUP
     assert 'ALLOW_ISOLATED_RESTORE:-false' in RESTORE
     assert '[[ "$target_database" != "$source_database" ]]' in RESTORE
     for table in ("messages", "communication_consents", "communication_suppressions"):
         assert table in RESTORE
     for boundary in ("idempotency_key", "subject_key", "recipient"):
         assert boundary in RESTORE
+    assert "i.indisunique and i.indisvalid and i.indisready" in RESTORE
+    assert "cardinality(e.columns)" in RESTORE
+    assert "flock -n 8" in RESTORE
+    assert "restore evidence stamp collision" in RESTORE
     assert "drop database" not in (BACKUP + RESTORE).lower()
 
 
@@ -45,9 +51,12 @@ def test_backup_publishes_verified_relocatable_artifacts():
         root = Path(directory)
         tools = _mock_tools(root)
         backup_root = root / "backups"
+        passfile = root / "pgpass"
+        passfile.write_text("synthetic")
+        passfile.chmod(0o600)
         result = subprocess.run(
             [str(ROOT / "operations/recovery/backup-postgres.sh")],
-            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "POSTGRES_DSN": "postgresql://synthetic.invalid/codestra_communication", "CODESTRA_COMMUNICATION_BACKUP_ROOT": str(backup_root), "CODESTRA_RELEASE_SHA": "1" * 40, "CODESTRA_IMAGE_DIGEST": "sha256:" + "2" * 64, "CODESTRA_BACKUP_GPG_RECIPIENT": "synthetic-test-recipient"},
+            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "PGHOST": "synthetic.invalid", "PGPORT": "5432", "PGDATABASE": "codestra_communication", "PGUSER": "synthetic", "PGPASSFILE": str(passfile), "CODESTRA_COMMUNICATION_BACKUP_ROOT": str(backup_root), "CODESTRA_RELEASE_SHA": "1" * 40, "CODESTRA_IMAGE_DIGEST": "sha256:" + "2" * 64, "CODESTRA_BACKUP_GPG_RECIPIENT": "synthetic-test-recipient"},
             text=True, capture_output=True, check=False,
         )
         assert result.returncode == 0, result.stderr
@@ -63,6 +72,9 @@ def test_restore_refuses_source_identity_before_mutation():
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
         tools = _mock_tools(root)
+        passfile = root / "pgpass"
+        passfile.write_text("synthetic")
+        passfile.chmod(0o600)
         backup = root / "backup"
         backup.mkdir()
         (backup / "database.dump.gpg").write_text("synthetic")
@@ -71,7 +83,7 @@ def test_restore_refuses_source_identity_before_mutation():
             subprocess.run(["sha256sum", "database.dump.gpg", "METADATA"], cwd=backup, text=True, stdout=manifest, check=True)
         result = subprocess.run(
             [str(ROOT / "operations/recovery/verify-isolated-restore.sh")],
-            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "POSTGRES_DSN": "postgresql://synthetic.invalid/codestra_communication", "CODESTRA_COMMUNICATION_BACKUP_DIR": str(backup), "CODESTRA_COMMUNICATION_RESTORE_EVIDENCE_DIR": str(root / "evidence"), "ALLOW_ISOLATED_RESTORE": "true", "MOCK_PSQL_VALUE": "codestra_communication"},
+            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "PGHOST": "synthetic.invalid", "PGPORT": "5432", "PGDATABASE": "codestra_communication", "PGUSER": "synthetic", "PGPASSFILE": str(passfile), "CODESTRA_COMMUNICATION_BACKUP_DIR": str(backup), "CODESTRA_COMMUNICATION_RESTORE_EVIDENCE_DIR": str(root / "evidence"), "ALLOW_ISOLATED_RESTORE": "true", "MOCK_PSQL_VALUE": "codestra_communication"},
             text=True, capture_output=True, check=False,
         )
         assert result.returncode == 2

@@ -3,10 +3,12 @@
 These source controls do not authorize deployment or production delivery.
 
 Before a migration or rollout, an authorized operator runs the recovery backup
-with a protected DSN, root-owned mode-0700 directory, exact release SHA, exact
+with libpq `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, and an owner-protected
+`PGPASSFILE`, a root-owned mode-0700 directory, exact release SHA, exact
 image digest, and approved OpenPGP recovery recipient. It validates a
 custom-format dump, encrypts it, destroys the temporary plaintext, and
-atomically publishes relocatable checksums and `LAST_SUCCESS`.
+atomically publishes relocatable checksums and `LAST_SUCCESS`. Database
+credentials are never passed as process arguments.
 
 Restore verification requires `ALLOW_ISOLATED_RESTORE=true`, a disposable
 database whose name contains `restore`, and an identity different from the
