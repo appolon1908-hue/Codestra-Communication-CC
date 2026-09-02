@@ -1305,16 +1305,8 @@ async def upsert_preference(
     encoded_metadata = json.dumps(body.metadata, sort_keys=True, separators=(",", ":"))
     if len(encoded_metadata.encode("utf-8")) > 8192:
         raise HTTPException(status_code=413, detail="preference_metadata_too_large")
-    payload = body.model_dump(mode="json", exclude={"expected_version"}) | {"subject": subject}
+    payload = body.model_dump(mode="json") | {"subject": subject}
     fingerprint = _domain_fingerprint("preference.upsert", f"{body.channel.value}:{subject}:{topic}", payload)
-    replay = await session.scalar(select(PreferenceModel).where(
-        PreferenceModel.tenant_id == x_tenant_id,
-        PreferenceModel.idempotency_key == idempotency_key,
-    ))
-    if replay is not None:
-        if replay.request_fingerprint != fingerprint:
-            raise HTTPException(status_code=409, detail="idempotency_conflict")
-        return _preference_response(replay)
     row = await session.scalar(
         select(PreferenceModel).where(
             PreferenceModel.tenant_id == x_tenant_id,
@@ -1323,6 +1315,23 @@ async def upsert_preference(
             PreferenceModel.topic == topic,
         ).with_for_update()
     )
+    aggregate_key = f"{body.channel.value}:{subject}:{topic}"
+    version = 1 if row is None else row.resource_version + 1
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="preference",
+        aggregate_key=aggregate_key, kind="preference.upsert",
+        idempotency_key=idempotency_key, payload=payload, result_version=version,
+    ):
+        if row is None:
+            row = await session.scalar(select(PreferenceModel).where(
+                PreferenceModel.tenant_id == x_tenant_id,
+                PreferenceModel.subject == subject,
+                PreferenceModel.channel == body.channel.value,
+                PreferenceModel.topic == topic,
+            ))
+        if row is None:
+            raise HTTPException(status_code=409, detail="preference_replay_missing")
+        return _preference_response(row)
     if row is None:
         if body.expected_version is not None:
             raise HTTPException(status_code=409, detail="preference_not_found_for_expected_version")
@@ -1339,7 +1348,6 @@ async def upsert_preference(
         row.consent = body.consent
         row.source = body.source
         row.metadata_json = encoded_metadata
-        row.idempotency_key = idempotency_key
         row.request_fingerprint = fingerprint
         row.resource_version += 1
     try:
@@ -1351,11 +1359,18 @@ async def upsert_preference(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
+        mutation = await session.scalar(select(DomainMutationModel).where(
+            DomainMutationModel.tenant_id == x_tenant_id,
+            DomainMutationModel.mutation_type == "preference.upsert",
+            DomainMutationModel.idempotency_key == idempotency_key,
+        ))
         winner = await session.scalar(select(PreferenceModel).where(
             PreferenceModel.tenant_id == x_tenant_id,
-            PreferenceModel.idempotency_key == idempotency_key,
+            PreferenceModel.subject == subject,
+            PreferenceModel.channel == body.channel.value,
+            PreferenceModel.topic == topic,
         ))
-        if winner is None or winner.request_fingerprint != fingerprint:
+        if mutation is None or mutation.request_fingerprint != fingerprint or winner is None:
             raise HTTPException(status_code=409, detail="preference_conflict") from exc
         row = winner
     await session.refresh(row)
