@@ -17,6 +17,7 @@ def keys(tmp_path, monkeypatch):
     (root / "key-2.key").chmod(0o600)
     monkeypatch.setenv("COMMUNICATION_DATA_KEY_DIR", str(root))
     monkeypatch.setenv("COMMUNICATION_ACTIVE_DATA_KEY_ID", "key-1")
+    monkeypatch.setenv("COMMUNICATION_BLIND_INDEX_KEY_ID", "key-1")
     return root
 
 
@@ -30,6 +31,12 @@ def test_authenticated_encryption_binds_tenant_and_purpose_and_supports_rotation
     assert unprotect(envelope, tenant_id="tenant-a", purpose="recipient") == "person@example.invalid"
     rotated = protect("person@example.invalid", tenant_id="tenant-a", purpose="recipient")
     assert rotated.startswith("v1:key-2:")
+
+
+def test_blind_index_remains_stable_when_encryption_write_key_rotates(keys, monkeypatch):
+    before = blind_index("person@example.invalid", tenant_id="tenant-a", purpose="recipient")
+    monkeypatch.setenv("COMMUNICATION_ACTIVE_DATA_KEY_ID", "key-2")
+    assert blind_index("person@example.invalid", tenant_id="tenant-a", purpose="recipient") == before
 
 
 def test_blind_index_is_context_bound_and_deterministic(keys):

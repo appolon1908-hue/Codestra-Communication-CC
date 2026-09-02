@@ -24,7 +24,9 @@ Recipient identifiers, consent/preference subjects, template content, and
 delivery commands are encrypted with AES-256-GCM before persistence. Set
 `COMMUNICATION_DATA_KEY_DIR` to an absolute, non-symlinked directory containing
 mode-0600 `<key-id>.key` files and set `COMMUNICATION_ACTIVE_DATA_KEY_ID` to the
-write key. The service keeps older key files only for rotation-time reads and
+write key. Set `COMMUNICATION_BLIND_INDEX_KEY_ID` to a separately governed,
+stable key identity; changing it requires an explicit blind-index rebuild. The
+service keeps older encryption key files only for rotation-time reads and
 reports not-ready when the active key cannot be loaded. Legacy plaintext reads
 are disabled by default and exist only as a bounded migration compatibility
 mode.

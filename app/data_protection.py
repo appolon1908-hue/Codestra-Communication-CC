@@ -48,6 +48,13 @@ def _active_key_id() -> str:
     return value
 
 
+def _blind_index_key_id() -> str:
+    value = os.getenv("COMMUNICATION_BLIND_INDEX_KEY_ID", "").strip()
+    if not _KEY_ID.fullmatch(value):
+        raise DataProtectionError("blind_index_key_id_invalid")
+    return value
+
+
 def _key(key_id: str) -> bytes:
     if not _KEY_ID.fullmatch(key_id):
         raise DataProtectionError("data_key_id_invalid")
@@ -101,7 +108,9 @@ def unprotect(envelope: str, *, tenant_id: str, purpose: str) -> str:
 
 
 def blind_index(value: str, *, tenant_id: str, purpose: str) -> str:
-    active = _key(_active_key_id())
+    # This key identity is deliberately independent from the rotating AEAD write
+    # key. Changing it requires an explicit index-rebuild migration.
+    active = _key(_blind_index_key_id())
     index_key = HKDF(
         algorithm=hashes.SHA256(), length=32, salt=None,
         info=b"codestra-communication-blind-index-v1",
@@ -113,6 +122,7 @@ def blind_index(value: str, *, tenant_id: str, purpose: str) -> str:
 def readiness() -> tuple[bool, str]:
     try:
         _key(_active_key_id())
+        _key(_blind_index_key_id())
     except DataProtectionError as exc:
         return False, str(exc)
     return True, "ready"

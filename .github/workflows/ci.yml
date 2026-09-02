@@ -48,6 +48,7 @@ jobs:
       EXTERNAL_DELIVERY_ENABLED: 'false'
       COMMUNICATION_DATA_KEY_DIR: /tmp/codestra-communication-test-keys
       COMMUNICATION_ACTIVE_DATA_KEY_ID: key-1
+      COMMUNICATION_BLIND_INDEX_KEY_ID: key-1
       COMMUNICATION_ALLOW_LEGACY_PLAINTEXT_READS: 'true'
     steps:
       - uses: actions/checkout@v4
