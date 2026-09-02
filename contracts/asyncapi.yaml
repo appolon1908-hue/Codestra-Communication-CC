@@ -1,0 +1,37 @@
+asyncapi: 3.0.0
+info:
+  title: Codestra Communication Integration Events
+  version: 1.0.0
+  description: Sanitized, durable communication lifecycle events. Recipient and content are excluded.
+channels:
+  communicationEvents:
+    address: codestra.communication.events.v1
+    messages:
+      lifecycleEvent:
+        $ref: '#/components/messages/LifecycleEvent'
+operations:
+  publishLifecycleEvent:
+    action: send
+    channel:
+      $ref: '#/channels/communicationEvents'
+    messages:
+      - $ref: '#/channels/communicationEvents/messages/lifecycleEvent'
+components:
+  messages:
+    LifecycleEvent:
+      contentType: application/json
+      payload:
+        type: object
+        additionalProperties: false
+        required: [specversion, id, type, source, subject, tenant_id, message_id, status, correlation_id]
+        properties:
+          specversion: {type: string, const: '1.0'}
+          id: {type: string}
+          type: {type: string, pattern: '^communication\\.message\\.'}
+          source: {type: string, const: 'urn:codestra:communication'}
+          subject: {type: string}
+          tenant_id: {type: string}
+          message_id: {type: string, format: uuid}
+          previous_status: {type: [string, 'null']}
+          status: {type: string}
+          correlation_id: {type: string}

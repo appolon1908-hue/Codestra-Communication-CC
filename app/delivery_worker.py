@@ -11,11 +11,11 @@ from sqlalchemy import and_, or_, select
 
 from .db import SessionLocal
 from .middleware_client import MiddlewareCommunicationClient, MiddlewareDeliveryError, MiddlewareResult
+from .events import record_message_event
 from .models import (
     CommunicationAuditModel,
     CommunicationOperationModel,
     DeliveryOutboxModel,
-    MessageEventModel,
     MessageModel,
 )
 
@@ -157,15 +157,10 @@ async def complete(
             event_type = f"communication.message.reconciliation_{message.status}"
         else:
             event_type = "communication.message.deliver.middleware_accepted"
-        session.add(
-            MessageEventModel(
-                tenant_id=message.tenant_id, message_id=message.id,
-                event_type=event_type,
-                previous_status=previous, new_status=message.status,
-                actor_id="communication-delivery-worker",
-                correlation_id=operation.correlation_id,
-                safe_detail=result.state[:32],
-            )
+        await record_message_event(
+            session, message, event_type=event_type, previous_status=previous,
+            actor_id="communication-delivery-worker", correlation_id=operation.correlation_id,
+            safe_detail=result.state[:32],
         )
         await session.commit()
 
@@ -214,17 +209,10 @@ async def fail(
                 )
                 message.resource_version += 1
                 event_type = f"communication.message.{message.status}"
-                session.add(
-                    MessageEventModel(
-                        tenant_id=message.tenant_id,
-                        message_id=message.id,
-                        event_type=event_type,
-                        previous_status=previous,
-                        new_status=message.status,
-                        actor_id="communication-delivery-worker",
-                        correlation_id=operation.correlation_id,
-                        safe_detail=error.code[:80],
-                    )
+                await record_message_event(
+                    session, message, event_type=event_type, previous_status=previous,
+                    actor_id="communication-delivery-worker", correlation_id=operation.correlation_id,
+                    safe_detail=error.code[:80],
                 )
                 session.add(
                     CommunicationAuditModel(

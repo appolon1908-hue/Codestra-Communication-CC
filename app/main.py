@@ -24,6 +24,7 @@ from .db import get_session
 from .auth import require_scope
 from .models import (
     CommunicationAuditModel,
+    CommunicationEventOutboxModel,
     CommunicationOperationModel,
     ConsentModel,
     DomainMutationModel,
@@ -35,6 +36,7 @@ from .models import (
     SuppressionModel,
     TemplateModel,
 )
+from .events import record_message_event
 from .metrics import DELIVERY_OUTBOX, HTTP_DURATION, HTTP_REQUESTS, OPERATIONS, PROVIDER_INBOX, render
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
@@ -236,17 +238,9 @@ async def _message_event(
     request: Request | None,
     safe_detail: str | None = None,
 ) -> None:
-    session.add(
-        MessageEventModel(
-            tenant_id=row.tenant_id,
-            message_id=row.id,
-            event_type=event_type,
-            previous_status=previous_status,
-            new_status=row.status,
-            actor_id=_actor(request),
-            correlation_id=_correlation(request),
-            safe_detail=safe_detail,
-        )
+    await record_message_event(
+        session, row, event_type=event_type, previous_status=previous_status,
+        actor_id=_actor(request), correlation_id=_correlation(request), safe_detail=safe_detail,
     )
     session.add(
         CommunicationAuditModel(
@@ -391,6 +385,13 @@ async def metrics(session: AsyncSession = Depends(get_session)) -> Response:
         counts = {str(state): int(count) for state, count in rows.all()}
         for state in states:
             gauge.labels(state=state).set(counts.get(state, 0))
+    event_depth = await session.scalar(
+        select(func.count()).select_from(CommunicationEventOutboxModel).where(
+            CommunicationEventOutboxModel.state.in_(("pending", "publishing"))
+        )
+    )
+    from .metrics import EVENT_OUTBOX_DEPTH
+    EVENT_OUTBOX_DEPTH.set(int(event_depth or 0))
     body, media_type = render()
     return Response(content=body, media_type=media_type)
 

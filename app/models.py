@@ -54,6 +54,29 @@ class MessageEventModel(Base):
     )
 
 
+class CommunicationEventOutboxModel(Base):
+    __tablename__ = "communication_event_outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[int] = mapped_column(BigInteger, nullable=False, unique=True, index=True)
+    topic: Mapped[str] = mapped_column(String(160), nullable=False)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(24), nullable=False, default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["event_id"], ["communication_message_events.id"],
+            ondelete="CASCADE", name="fk_communication_event_outbox_event",
+        ),
+    )
+
+
 class MessageMutationModel(Base):
     __tablename__ = "communication_message_mutations"
 

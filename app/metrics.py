@@ -28,6 +28,15 @@ PROVIDER_INBOX = Gauge(
     "Persisted provider inbox records by bounded state.",
     ("state",),
 )
+EVENT_OUTBOX_DEPTH = Gauge(
+    "codestra_communication_event_outbox_depth",
+    "Unpublished durable integration events.",
+)
+EVENT_PUBLICATIONS = Counter(
+    "codestra_communication_event_publications_total",
+    "Integration event publication outcomes.",
+    ("outcome",),
+)
 
 
 def render() -> tuple[bytes, str]:

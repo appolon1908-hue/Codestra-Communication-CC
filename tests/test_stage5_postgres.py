@@ -46,6 +46,7 @@ from app.main import (
 )
 from app.models import (
     CommunicationAuditModel,
+    CommunicationEventOutboxModel,
     CommunicationOperationModel,
     ConsentModel,
     MessageEventModel,
@@ -57,10 +58,43 @@ from app.models import (
     TemplateModel,
 )
 from app.delivery_worker import run_once as run_delivery_once
+from app.event_worker import acknowledge, claim, reject
 from app.middleware_client import MiddlewareDeliveryError, MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.asyncio
+async def test_message_event_and_publish_intent_are_atomic_sanitized_and_attempt_fenced(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant = f"tenant-event-{uuid.uuid4()}"
+    recipient = f"private-{uuid.uuid4()}@example.invalid"
+    async with sessions() as session:
+        session.add(ConsentModel(tenant_id=tenant, subject_key=recipient, channel="email",
+                                 status="granted", source="event-test"))
+        await session.commit()
+    async with sessions() as session:
+        created = await create_message(MessageCreate(channel=Channel.EMAIL, recipient=recipient,
+            template_key="event.test", purpose=Purpose.MARKETING), tenant, str(uuid.uuid4()), session)
+    async with sessions() as session:
+        row = await session.scalar(select(CommunicationEventOutboxModel).where(
+            CommunicationEventOutboxModel.payload_json.contains(str(created.id))))
+        assert row is not None
+        assert recipient not in row.payload_json
+        assert "event.test" not in row.payload_json
+        assert row.state == "pending"
+    claimed = await claim(1, 30, session_factory=sessions)
+    assert claimed
+    event = next(item for item in claimed if str(created.id) in item.payload_json)
+    assert await acknowledge(event.id, event.attempts + 1, session_factory=sessions) is False
+    assert await reject(event.id, event.attempts, 1, session_factory=sessions) is True
+    async with sessions() as session:
+        row = await session.get(CommunicationEventOutboxModel, event.id)
+        assert row.state == "dead_letter"
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
