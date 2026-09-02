@@ -186,6 +186,20 @@ class ProviderResult(BaseModel):
     provider_message_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 
+class ProviderStatus(BaseModel):
+    channel: Channel
+    route: str
+    state: str
+    health: str
+    reputation: str
+    direct_provider_credentials: bool = False
+
+
+def _require_business_writes() -> None:
+    if not BUSINESS_WRITES_ENABLED:
+        raise HTTPException(status_code=423, detail="business_writes_disabled")
+
+
 def _actor(request: Request | None) -> str:
     principal = getattr(getattr(request, "state", None), "principal", None)
     return getattr(principal, "subject", "codestra-communication-internal")[:160]
@@ -409,8 +423,7 @@ async def create_message(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> MessageModel:
-    if not BUSINESS_WRITES_ENABLED:
-        raise HTTPException(status_code=423, detail="business_writes_disabled")
+    _require_business_writes()
     tenant_id = _tenant(x_tenant_id, body.tenant_id)
     if body.idempotency_key is not None and body.idempotency_key != idempotency_key:
         raise HTTPException(status_code=400, detail="idempotency_header_body_mismatch")
@@ -607,6 +620,7 @@ async def cancel_message(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> MessageModel:
+    _require_business_writes()
     row = await session.scalar(
         select(MessageModel)
         .where(MessageModel.id == message_id, MessageModel.tenant_id == x_tenant_id)
@@ -705,6 +719,7 @@ async def create_template(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> TemplateModel:
+    _require_business_writes()
     payload = body.model_dump(mode="json")
     fingerprint = _domain_fingerprint("template.create", f"{body.key}:{body.locale}", payload)
     prior = await session.scalar(
@@ -796,6 +811,7 @@ async def update_template(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> TemplateModel:
+    _require_business_writes()
     row = await session.scalar(
         select(TemplateModel)
         .where(TemplateModel.id == template_id, TemplateModel.tenant_id == x_tenant_id)
@@ -838,6 +854,7 @@ async def grant_consent(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> ConsentModel:
+    _require_business_writes()
     subject = _recipient(body.subject_key, body.channel)
     row = await session.scalar(
         select(ConsentModel)
@@ -873,12 +890,35 @@ async def grant_consent(
         row.source = body.source
         row.evidence = body.evidence
         row.resource_version += 1
-    await session.flush()
-    _audit_domain(
-        session, tenant_id=x_tenant_id, aggregate_type="consent", aggregate_id=row.id,
-        action="communication.consent.granted", request=request,
-    )
-    await session.commit()
+    try:
+        await session.flush()
+        _audit_domain(
+            session, tenant_id=x_tenant_id, aggregate_type="consent", aggregate_id=row.id,
+            action="communication.consent.granted", request=request,
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        mutation = await session.scalar(
+            select(DomainMutationModel).where(
+                DomainMutationModel.tenant_id == x_tenant_id,
+                DomainMutationModel.mutation_type == "consent.grant",
+                DomainMutationModel.idempotency_key == idempotency_key,
+            )
+        )
+        winner = await session.scalar(
+            select(ConsentModel).where(
+                ConsentModel.tenant_id == x_tenant_id,
+                ConsentModel.subject_key == subject,
+                ConsentModel.channel == body.channel.value,
+            )
+        )
+        expected = _domain_fingerprint(
+            "consent.grant", f"{body.channel.value}:{subject}", payload
+        )
+        if mutation is None or mutation.request_fingerprint != expected or winner is None:
+            raise HTTPException(status_code=409, detail="consent_conflict") from exc
+        return winner
     await session.refresh(row)
     return row
 
@@ -912,6 +952,7 @@ async def revoke_consent(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> ConsentModel:
+    _require_business_writes()
     subject = _recipient(body.subject_key, body.channel)
     row = await session.scalar(
         select(ConsentModel)
@@ -958,6 +999,7 @@ async def create_suppression(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> SuppressionModel:
+    _require_business_writes()
     recipient = _recipient(body.recipient, body.channel)
     row = await session.scalar(
         select(SuppressionModel)
@@ -988,12 +1030,35 @@ async def create_suppression(
         row.active = True
         row.reason = body.reason
         row.resource_version += 1
-    await session.flush()
-    _audit_domain(
-        session, tenant_id=x_tenant_id, aggregate_type="suppression", aggregate_id=row.id,
-        action="communication.suppression.created", request=request,
-    )
-    await session.commit()
+    try:
+        await session.flush()
+        _audit_domain(
+            session, tenant_id=x_tenant_id, aggregate_type="suppression", aggregate_id=row.id,
+            action="communication.suppression.created", request=request,
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        mutation = await session.scalar(
+            select(DomainMutationModel).where(
+                DomainMutationModel.tenant_id == x_tenant_id,
+                DomainMutationModel.mutation_type == "suppression.create",
+                DomainMutationModel.idempotency_key == idempotency_key,
+            )
+        )
+        winner = await session.scalar(
+            select(SuppressionModel).where(
+                SuppressionModel.tenant_id == x_tenant_id,
+                SuppressionModel.channel == body.channel.value,
+                SuppressionModel.recipient == recipient,
+            )
+        )
+        expected = _domain_fingerprint(
+            "suppression.create", f"{body.channel.value}:{recipient}", payload
+        )
+        if mutation is None or mutation.request_fingerprint != expected or winner is None:
+            raise HTTPException(status_code=409, detail="suppression_conflict") from exc
+        return winner
     await session.refresh(row)
     return row
 
@@ -1028,6 +1093,7 @@ async def delete_suppression(
     session: AsyncSession = Depends(get_session),
     request: Request = None,
 ) -> SuppressionModel:
+    _require_business_writes()
     row = await session.scalar(
         select(SuppressionModel)
         .where(SuppressionModel.id == suppression_id, SuppressionModel.tenant_id == x_tenant_id)
@@ -1071,6 +1137,26 @@ def _webhook_secret(provider: str) -> bytes:
     return value
 
 
+@router.get(
+    "/providers",
+    response_model=list[ProviderStatus],
+    dependencies=[Depends(require_scope("communications.providers.read"))],
+)
+def provider_statuses() -> list[ProviderStatus]:
+    state = "middleware_routed" if EXTERNAL_DELIVERY_ENABLED else "delivery_disabled"
+    health = "not_probed" if EXTERNAL_DELIVERY_ENABLED else "disabled"
+    return [
+        ProviderStatus(
+            channel=channel,
+            route="middleware",
+            state=state,
+            health=health,
+            reputation="not_applicable" if not EXTERNAL_DELIVERY_ENABLED else "not_probed",
+        )
+        for channel in Channel
+    ]
+
+
 @app.post("/v1/webhooks/communications/{provider}/results", status_code=202)
 async def provider_result(
     provider: str,
@@ -1094,9 +1180,16 @@ async def provider_result(
     supplied = x_provider_signature.removeprefix("sha256=").lower()
     if not re.fullmatch(r"[0-9a-f]{64}", supplied):
         raise HTTPException(status_code=401, detail="webhook_signature_invalid")
-    expected = hmac.new(
-        _webhook_secret(provider), x_provider_timestamp.encode() + b"." + body, hashlib.sha256
-    ).hexdigest()
+    signed = b".".join(
+        (
+            provider.encode(),
+            x_tenant_id.encode(),
+            x_provider_event_id.encode(),
+            x_provider_timestamp.encode(),
+            body,
+        )
+    )
+    expected = hmac.new(_webhook_secret(provider), signed, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(supplied, expected):
         raise HTTPException(status_code=401, detail="webhook_signature_invalid")
     try:
@@ -1130,10 +1223,25 @@ async def provider_result(
     ):
         raise HTTPException(status_code=409, detail="provider_message_mismatch")
     previous = message.status
-    message.status = event.event_type
+    allowed_transitions = {
+        "middleware_accepted": {"sent", "delivered", "failed", "bounced", "complained", "cancelled"},
+        "sent": {"delivered", "failed", "bounced", "complained", "cancelled"},
+        "delivered": {"complained"},
+        "failed": set(),
+        "bounced": {"complained"},
+        "complained": set(),
+        "cancelled": set(),
+    }
+    transition_allowed = (
+        event.event_type == previous
+        or event.event_type in allowed_transitions.get(previous, set())
+    )
+    if transition_allowed:
+        message.status = event.event_type
     if event.provider_message_id is not None:
         message.provider_message_id = event.provider_message_id
-    message.resource_version += 1
+    if message.status != previous:
+        message.resource_version += 1
     session.add(
         ProviderInboxModel(
             tenant_id=x_tenant_id,
@@ -1147,10 +1255,14 @@ async def provider_result(
     await _message_event(
         session,
         message,
-        event_type=f"communication.message.{event.event_type}",
+        event_type=(
+            f"communication.message.{event.event_type}"
+            if transition_allowed
+            else "communication.message.provider_event_ignored"
+        ),
         previous_status=previous,
         request=request,
-        safe_detail=provider,
+        safe_detail=provider if transition_allowed else f"{provider}:stale_transition",
     )
     try:
         await session.commit()

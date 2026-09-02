@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import uuid
 import hashlib
 import hmac
@@ -52,7 +53,7 @@ from app.models import (
     TemplateModel,
 )
 from app.delivery_worker import run_once as run_delivery_once
-from app.middleware_client import MiddlewareResult
+from app.middleware_client import MiddlewareDeliveryError, MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
@@ -180,6 +181,58 @@ async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts
 
 
 @pytest.mark.asyncio
+async def test_unknown_delivery_outcome_stops_redispatch_and_updates_public_state(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    monkeypatch.setattr("app.main.EXTERNAL_DELIVERY_ENABLED", True)
+    monkeypatch.setenv("EXTERNAL_DELIVERY_ENABLED", "true")
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-unknown-{uuid.uuid4()}"
+    async with sessions() as session:
+        message = await create_message(
+            MessageCreate(
+                channel=Channel.EMAIL,
+                recipient=f"unknown-{uuid.uuid4()}@example.invalid",
+                template_key="transactional.test",
+                purpose=Purpose.TRANSACTIONAL,
+            ),
+            tenant_id,
+            f"message-{uuid.uuid4()}",
+            session,
+        )
+        message_id = message.id
+
+    class Client:
+        async def dispatch(self, _payload):
+            raise MiddlewareDeliveryError(
+                "middleware_outcome_unknown", retryable=True, outcome_unknown=True
+            )
+
+    assert await run_delivery_once(Client(), lease_seconds=30, max_attempts=8, session_factory=sessions)
+    async with sessions() as session:
+        message = await session.get(MessageModel, message_id)
+        operation = await session.scalar(
+            select(CommunicationOperationModel).where(
+                CommunicationOperationModel.message_id == message_id
+            )
+        )
+        outbox = await session.scalar(
+            select(DeliveryOutboxModel).where(DeliveryOutboxModel.operation_id == operation.id)
+        )
+        assert message.status == "reconciliation_required"
+        assert operation.state == "reconciliation_required"
+        assert outbox.state == "reconciliation_required"
+        assert await session.scalar(
+            select(func.count()).select_from(CommunicationAuditModel).where(
+                CommunicationAuditModel.aggregate_id == message_id,
+                CommunicationAuditModel.action == "communication.message.reconciliation_required",
+            )
+        ) == 1
+    assert not await run_delivery_once(Client(), lease_seconds=30, max_attempts=8, session_factory=sessions)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_provider_webhook_is_signed_replay_safe_and_tenant_bound(monkeypatch, tmp_path):
     secret = b"synthetic-webhook-secret-material-32bytes"
     secret_dir = tmp_path / "webhooks"
@@ -210,24 +263,64 @@ async def test_provider_webhook_is_signed_replay_safe_and_tenant_bound(monkeypat
         separators=(",", ":"),
     ).encode()
     timestamp = str(int(time.time()))
-    signature = hmac.new(secret, timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    event_id = "provider-event-1"
+    signature = hmac.new(
+        secret,
+        b".".join(
+            (
+                b"synthetic",
+                tenant_id.encode(),
+                event_id.encode(),
+                timestamp.encode(),
+                body,
+            )
+        ),
+        hashlib.sha256,
+    ).hexdigest()
     headers = {
         "X-Tenant-ID": tenant_id,
         "X-Correlation-ID": f"corr-{uuid.uuid4()}",
         "X-Provider-Timestamp": timestamp,
-        "X-Provider-Event-ID": "provider-event-1",
+        "X-Provider-Event-ID": event_id,
         "X-Provider-Signature": f"sha256={signature}",
         "Content-Type": "application/json",
     }
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         first = await client.post("/v1/webhooks/communications/synthetic/results", headers=headers, content=body)
         replay = await client.post("/v1/webhooks/communications/synthetic/results", headers=headers, content=body)
+        stale_body = json.dumps(
+            {
+                "message_id": str(message_id), "event_type": "sent",
+                "provider_message_id": "provider-message-1",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        stale_headers = dict(headers)
+        stale_headers["X-Provider-Event-ID"] = "provider-event-2"
+        stale_signature = hmac.new(
+            secret,
+            b".".join(
+                (
+                    b"synthetic", tenant_id.encode(), b"provider-event-2",
+                    timestamp.encode(), stale_body,
+                )
+            ),
+            hashlib.sha256,
+        ).hexdigest()
+        stale_headers["X-Provider-Signature"] = f"sha256={stale_signature}"
+        stale = await client.post(
+            "/v1/webhooks/communications/synthetic/results",
+            headers=stale_headers,
+            content=stale_body,
+        )
     assert first.status_code == 202 and first.json()["status"] == "processed"
     assert replay.status_code == 202 and replay.json()["status"] == "already_processed"
+    assert stale.status_code == 202 and stale.json()["status"] == "processed"
     async with sessions() as session:
         message = await session.get(MessageModel, message_id)
         assert message.status == "delivered"
-        assert await session.scalar(select(func.count()).select_from(ProviderInboxModel)) == 1
+        assert await session.scalar(select(func.count()).select_from(ProviderInboxModel)) == 2
     await engine.dispose()
 
 
@@ -286,7 +379,8 @@ async def test_message_history_cancel_and_mutation_ledger_are_durable(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe():
+async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
     engine = create_async_engine(os.environ["DATABASE_URL"])
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     tenant_id = f"tenant-policy-{uuid.uuid4()}"
@@ -345,4 +439,39 @@ async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe
     async with sessions() as session:
         assert await session.scalar(select(func.count()).select_from(TemplateModel)) == 1
         assert await session.scalar(select(func.count()).select_from(CommunicationAuditModel)) >= 5
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_policy_inserts_return_the_committed_winner(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-policy-race-{uuid.uuid4()}"
+    recipient = f"race-{uuid.uuid4()}@example.invalid"
+    consent_body = ConsentChange(
+        subject_key=recipient, channel=Channel.EMAIL, source="synthetic-race"
+    )
+
+    async def consent_attempt():
+        async with sessions() as session:
+            return await grant_consent(
+                consent_body, tenant_id, "concurrent-consent-key", session
+            )
+
+    consents = await asyncio.gather(consent_attempt(), consent_attempt())
+    assert consents[0].id == consents[1].id
+
+    suppression_body = SuppressionCreate(
+        recipient=recipient, channel=Channel.EMAIL, reason="synthetic-race"
+    )
+
+    async def suppression_attempt():
+        async with sessions() as session:
+            return await create_suppression(
+                suppression_body, tenant_id, "concurrent-suppression-key", session
+            )
+
+    suppressions = await asyncio.gather(suppression_attempt(), suppression_attempt())
+    assert suppressions[0].id == suppressions[1].id
     await engine.dispose()

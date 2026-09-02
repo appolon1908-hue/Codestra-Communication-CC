@@ -11,7 +11,13 @@ from sqlalchemy import and_, or_, select
 
 from .db import SessionLocal
 from .middleware_client import MiddlewareCommunicationClient, MiddlewareDeliveryError, MiddlewareResult
-from .models import CommunicationOperationModel, DeliveryOutboxModel, MessageEventModel, MessageModel
+from .models import (
+    CommunicationAuditModel,
+    CommunicationOperationModel,
+    DeliveryOutboxModel,
+    MessageEventModel,
+    MessageModel,
+)
 
 
 UTC = timezone.utc
@@ -130,14 +136,56 @@ async def fail(
             or outbox.attempts != claim.attempts
         ):
             return
-        terminal = not error.retryable or claim.attempts >= max_attempts
-        outbox.state = "dead_letter" if terminal else "pending"
+        terminal = error.outcome_unknown or not error.retryable or claim.attempts >= max_attempts
+        outbox.state = (
+            "reconciliation_required"
+            if error.outcome_unknown
+            else "dead_letter" if terminal else "pending"
+        )
         outbox.available_at = datetime.now(UTC) + timedelta(seconds=min(2 ** min(claim.attempts, 8), 300))
         outbox.lease_until = None
         outbox.last_error_code = error.code[:80]
         if terminal:
             operation.state = "reconciliation_required" if error.outcome_unknown else "failed"
             operation.error_code = error.code[:80]
+            message = await session.scalar(
+                select(MessageModel)
+                .where(
+                    MessageModel.id == operation.message_id,
+                    MessageModel.tenant_id == operation.tenant_id,
+                )
+                .with_for_update()
+            )
+            if message is not None:
+                previous = message.status
+                message.status = (
+                    "reconciliation_required" if error.outcome_unknown else "delivery_failed"
+                )
+                message.resource_version += 1
+                event_type = f"communication.message.{message.status}"
+                session.add(
+                    MessageEventModel(
+                        tenant_id=message.tenant_id,
+                        message_id=message.id,
+                        event_type=event_type,
+                        previous_status=previous,
+                        new_status=message.status,
+                        actor_id="communication-delivery-worker",
+                        correlation_id=operation.correlation_id,
+                        safe_detail=error.code[:80],
+                    )
+                )
+                session.add(
+                    CommunicationAuditModel(
+                        tenant_id=message.tenant_id,
+                        aggregate_type="message",
+                        aggregate_id=message.id,
+                        action=event_type,
+                        outcome="reconciliation_required" if error.outcome_unknown else "failed",
+                        actor_id="communication-delivery-worker",
+                        correlation_id=operation.correlation_id,
+                    )
+                )
         await session.commit()
 
 

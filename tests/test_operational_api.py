@@ -1,7 +1,8 @@
 import httpx
 import pytest
+from fastapi import HTTPException
 
-from app.main import BUSINESS_WRITES_ENABLED, app, capabilities, health, version
+from app.main import BUSINESS_WRITES_ENABLED, _require_business_writes, app, capabilities, health, version
 
 
 def test_operational_endpoints_are_attributable_and_fail_closed():
@@ -22,6 +23,12 @@ def test_version_does_not_invent_runtime_attribution():
     value = version()
     assert value["git_sha"] == "unknown"
     assert value["image_digest"] == "unknown"
+
+
+def test_business_mutation_gate_fails_closed():
+    with pytest.raises(HTTPException) as denied:
+        _require_business_writes()
+    assert denied.value.status_code == 423
 
 
 @pytest.mark.asyncio
