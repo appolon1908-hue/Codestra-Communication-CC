@@ -16,8 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
 from .models import ConsentModel, MessageModel, SuppressionModel
+from .telemetry import audit_event, configure_telemetry, install_correlation_middleware
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
+install_correlation_middleware(app)
+TELEMETRY_EXPORT_ENABLED = configure_telemetry(app)
 router = APIRouter(prefix="/v1/communications")
 EXTERNAL_DELIVERY_ENABLED = os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").lower() == "true"
 
@@ -101,6 +104,8 @@ def capabilities() -> dict[str, object]:
         "consent_enforcement": True,
         "suppression_enforcement": True,
         "external_delivery": EXTERNAL_DELIVERY_ENABLED,
+        "correlation_ids": True,
+        "telemetry_export": TELEMETRY_EXPORT_ENABLED,
     }
 
 
@@ -129,6 +134,7 @@ async def create_message(
     if row is not None:
         if row.request_fingerprint != fingerprint:
             raise HTTPException(status_code=409, detail="idempotency_conflict")
+        audit_event("message_replayed", message_id=str(row.id), status=row.status)
         return row
 
     suppressed = await session.execute(
@@ -179,6 +185,7 @@ async def create_message(
             raise HTTPException(status_code=409, detail="idempotency_conflict")
         return row
     await session.refresh(row)
+    audit_event("message_recorded", message_id=str(row.id), status=row.status, channel=row.channel)
 
     if EXTERNAL_DELIVERY_ENABLED:
         raise HTTPException(status_code=501, detail="provider_delivery_not_implemented")
