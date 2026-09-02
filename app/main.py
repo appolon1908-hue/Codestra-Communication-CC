@@ -366,7 +366,7 @@ async def metrics(session: AsyncSession = Depends(get_session)) -> Response:
 @app.get("/version")
 def version(request: Request = None) -> dict[str, object]:
     correlation_id = getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))
-    return {"service": SERVICE, "application_version": app.version, "api_versions": ["v1"], "git_sha": os.getenv("CODESTRA_GIT_SHA", "unknown"), "image_digest": os.getenv("CODESTRA_IMAGE_DIGEST", "unknown"), "build_timestamp": os.getenv("CODESTRA_BUILD_TIMESTAMP", "unknown"), "migration_revision": os.getenv("CODESTRA_MIGRATION_REVISION", "unknown"), "environment": os.getenv("CODESTRA_ENVIRONMENT", "unknown"), "correlation_id": correlation_id}
+    return {"service": SERVICE, "application_version": app.version, "release_id": os.getenv("CODESTRA_RELEASE_VERSION", "unknown"), "api_versions": ["v1"], "git_sha": os.getenv("CODESTRA_GIT_SHA", "unknown"), "image_digest": os.getenv("CODESTRA_IMAGE_DIGEST", "unknown"), "build_timestamp": os.getenv("CODESTRA_BUILD_TIMESTAMP", "unknown"), "migration_revision": os.getenv("CODESTRA_MIGRATION_REVISION", "unknown"), "schema_version": os.getenv("CODESTRA_MIGRATION_REVISION", "unknown"), "configuration_checksum": os.getenv("CODESTRA_CONFIGURATION_CHECKSUM", "unknown"), "environment": os.getenv("CODESTRA_ENVIRONMENT", "unknown"), "correlation_id": correlation_id}
 
 
 @app.get("/capabilities")
