@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
+from .auth import require_scope
 from .models import ConsentModel, MessageModel, SuppressionModel
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
@@ -152,7 +153,12 @@ def capabilities(request: Request = None) -> dict[str, object]:
     }
 
 
-@router.post("/messages", response_model=Message, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/messages",
+    response_model=Message,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_scope("communications.send"))],
+)
 async def create_message(
     body: MessageCreate,
     x_tenant_id: TenantHeader,
@@ -235,7 +241,11 @@ async def create_message(
     return row
 
 
-@router.get("/messages/{message_id}", response_model=Message)
+@router.get(
+    "/messages/{message_id}",
+    response_model=Message,
+    dependencies=[Depends(require_scope("communications.read"))],
+)
 async def get_message(
     message_id: UUID,
     x_tenant_id: TenantHeader,
