@@ -1752,8 +1752,6 @@ async def update_sender_identity(
         SenderIdentityModel.tenant_id == x_tenant_id).with_for_update())
     if row is None:
         raise HTTPException(status_code=404, detail="sender_identity_not_found")
-    if body.expected_version is None or row.resource_version != body.expected_version:
-        raise HTTPException(status_code=409, detail="stale_resource_version")
     domain = await _sender_domain(session, x_tenant_id, body)
     address = _recipient(body.address, body.channel)
     payload = body.model_dump(mode="json") | {"address": address}
@@ -1763,6 +1761,8 @@ async def update_sender_identity(
         idempotency_key=idempotency_key, payload=payload, result_version=row.resource_version + 1,
     ):
         return _sender_response(row)
+    if body.expected_version is None or row.resource_version != body.expected_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
     row.channel = body.channel.value
     row.address = address
     row.display_name = body.display_name

@@ -54,6 +54,7 @@ from app.main import (
     get_sender_identity,
     list_domains,
     list_sender_identities,
+    update_sender_identity,
     update_template,
     app,
     metrics,
@@ -122,6 +123,17 @@ async def test_domains_and_sender_identities_are_tenant_bound_and_never_self_ver
                 tenant, f"sender-{uuid.uuid4()}", session,
             )
         assert mismatch.value.status_code == 409
+    update_key = f"sender-update-{uuid.uuid4()}"
+    update = SenderIdentityWrite(
+        channel=Channel.EMAIL, address="sender@example.invalid", domain_id=domain_id,
+        display_name="Synthetic Sender", expected_version=1,
+    )
+    async with sessions() as session:
+        updated = await update_sender_identity(sender_id, update, tenant, update_key, session)
+        assert updated.resource_version == 2
+    async with sessions() as session:
+        replay = await update_sender_identity(sender_id, update, tenant, update_key, session)
+        assert replay.resource_version == 2
     await engine.dispose()
 
 
