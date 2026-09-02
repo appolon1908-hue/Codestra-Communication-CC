@@ -37,8 +37,10 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
 
 - Protect recipient and rendered communication content at rest with an approved,
   rotatable workload key supplied through secret injection.
-- Implement canonical sender-identity and sending-domain ownership, including
-  real DNS/provider verification rather than fabricated success.
+- Complete provider-side sender/domain verification. Registration and real
+  SPF/DKIM/DMARC/BIMI DNS read-back are implemented; reverse-DNS, transport TLS,
+  and provider account approval remain `not_configured`, and senders remain
+  `pending` until a separate provider-authorized `sending_enabled` state exists.
 - Implement evidence-backed reputation read-back; the canonical contract has no
   `unknown` state, so this service does not currently expose a reputation route.
 - Implement the documented conversation record contract after its request and

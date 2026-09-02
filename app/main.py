@@ -40,6 +40,7 @@ from .models import (
     TemplateModel,
 )
 from .events import record_message_event
+from .domain_verifier import DomainVerificationUnavailable, verify_domain_dns
 from .metrics import DELIVERY_OUTBOX, HTTP_DURATION, HTTP_REQUESTS, OPERATIONS, PROVIDER_INBOX, render
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
@@ -1638,6 +1639,73 @@ async def get_domain(domain_id: UUID, x_tenant_id: TenantHeader,
     return _domain_response(row)
 
 
+@router.post(
+    "/domains/{domain_id}/verify", response_model=SendingDomain,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_scope("communications.domains.write"))],
+)
+async def verify_domain(
+    domain_id: UUID, x_tenant_id: TenantHeader, idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session), request: Request = None,
+) -> SendingDomain:
+    _require_business_writes()
+    prior = await session.scalar(select(DomainMutationModel).where(
+        DomainMutationModel.tenant_id == x_tenant_id,
+        DomainMutationModel.mutation_type == "domain.verify",
+        DomainMutationModel.idempotency_key == idempotency_key,
+    ))
+    if prior is not None:
+        if prior.aggregate_key != str(domain_id):
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        replay = await session.scalar(select(SendingDomainModel).where(
+            SendingDomainModel.id == domain_id, SendingDomainModel.tenant_id == x_tenant_id))
+        if replay is None:
+            raise HTTPException(status_code=409, detail="domain_replay_missing")
+        return _domain_response(replay)
+    snapshot = await session.scalar(select(SendingDomainModel).where(
+        SendingDomainModel.id == domain_id, SendingDomainModel.tenant_id == x_tenant_id))
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="domain_not_found")
+    initial_version = snapshot.resource_version
+    domain_name = snapshot.domain
+    metadata = json.loads(snapshot.metadata_json)
+    await session.rollback()
+    try:
+        checks = await verify_domain_dns(domain_name, metadata)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DomainVerificationUnavailable as exc:
+        raise HTTPException(status_code=503, detail="dns_verification_unavailable") from exc
+    row = await session.scalar(select(SendingDomainModel).where(
+        SendingDomainModel.id == domain_id,
+        SendingDomainModel.tenant_id == x_tenant_id,
+    ).with_for_update())
+    if row is None:
+        raise HTTPException(status_code=404, detail="domain_not_found")
+    payload = {"domain_id": str(domain_id)}
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="sending_domain",
+        aggregate_key=str(domain_id), kind="domain.verify",
+        idempotency_key=idempotency_key, payload=payload, result_version=initial_version + 1,
+    ):
+        return _domain_response(row)
+    if row.resource_version != initial_version:
+        raise HTTPException(status_code=409, detail="domain_changed_during_verification")
+    row.spf = checks["spf"]
+    row.dkim = checks["dkim"]
+    row.dmarc = checks["dmarc"]
+    row.reverse_dns = checks["reverse_dns"]
+    row.tls = checks["tls"]
+    row.bimi = checks["bimi"]
+    row.status = "verified" if all(checks[key] == "valid" for key in ("spf", "dkim", "dmarc")) else "dns_required"
+    row.resource_version += 1
+    _audit_domain(session, tenant_id=x_tenant_id, aggregate_type="sending_domain",
+                  aggregate_id=row.id, action="communication.domain.dns_checked", request=request)
+    await session.commit()
+    await session.refresh(row)
+    return _domain_response(row)
+
+
 def _sender_response(row: SenderIdentityModel) -> SenderIdentity:
     return SenderIdentity(
         sender_identity_id=row.id, channel=Channel(row.channel), address=row.address,
@@ -1695,7 +1763,7 @@ async def create_sender_identity(
     row = SenderIdentityModel(
         tenant_id=x_tenant_id, channel=body.channel.value, address=address,
         display_name=body.display_name, domain_id=body.domain_id, metadata_json=metadata_json,
-        status="active" if domain is not None and domain.status in {"verified", "sending_enabled"} else "pending",
+        status="active" if domain is not None and domain.status == "sending_enabled" else "pending",
         idempotency_key=idempotency_key, request_fingerprint=fingerprint,
     )
     session.add(row)
@@ -1772,7 +1840,7 @@ async def update_sender_identity(
     row.display_name = body.display_name
     row.domain_id = body.domain_id
     row.metadata_json = _bounded_metadata(body.metadata)
-    row.status = "active" if domain is not None and domain.status in {"verified", "sending_enabled"} else "pending"
+    row.status = "active" if domain is not None and domain.status == "sending_enabled" else "pending"
     row.resource_version += 1
     _audit_domain(session, tenant_id=x_tenant_id, aggregate_type="sender_identity",
                   aggregate_id=row.id, action="communication.sender.updated", request=request)

@@ -55,6 +55,7 @@ from app.main import (
     list_domains,
     list_sender_identities,
     update_sender_identity,
+    verify_domain,
     update_template,
     app,
     metrics,
@@ -104,6 +105,17 @@ async def test_domains_and_sender_identities_are_tenant_bound_and_never_self_ver
         with pytest.raises(HTTPException) as hidden:
             await get_domain(domain_id, other, session)
         assert hidden.value.status_code == 404
+    async def verified_dns(_domain, _metadata):
+        return {"spf": "valid", "dkim": "valid", "dmarc": "valid", "bimi": "not_configured",
+                "reverse_dns": "not_configured", "tls": "not_configured"}
+    monkeypatch.setattr("app.main.verify_domain_dns", verified_dns)
+    verify_key = f"domain-verify-{uuid.uuid4()}"
+    async with sessions() as session:
+        verified = await verify_domain(domain_id, tenant, verify_key, session)
+        assert verified.status == "verified"
+    async with sessions() as session:
+        replay = await verify_domain(domain_id, tenant, verify_key, session)
+        assert replay.resource_version == verified.resource_version
     async with sessions() as session:
         sender = await create_sender_identity(
             SenderIdentityWrite(channel=Channel.EMAIL, address="Sender@Example.Invalid", domain_id=domain_id),
