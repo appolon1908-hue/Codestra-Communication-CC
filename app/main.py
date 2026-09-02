@@ -195,6 +195,20 @@ class ProviderStatus(BaseModel):
     direct_provider_credentials: bool = False
 
 
+class Operation(BaseModel):
+    id: UUID
+    message_id: UUID
+    kind: str
+    state: str
+    attempts: int
+    middleware_operation_id: str | None
+    error_code: str | None
+    correlation_id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = {"from_attributes": True}
+
+
 def _require_business_writes() -> None:
     if not BUSINESS_WRITES_ENABLED:
         raise HTTPException(status_code=423, detail="business_writes_disabled")
@@ -605,6 +619,49 @@ async def get_message_events(
         statement = statement.where(MessageEventModel.id > after)
     rows = await session.scalars(statement.order_by(MessageEventModel.id).limit(limit))
     return list(rows.all())
+
+
+@router.get(
+    "/operations",
+    response_model=list[Operation],
+    dependencies=[Depends(require_scope("communications.operations.read"))],
+)
+async def list_operations(
+    x_tenant_id: TenantHeader,
+    state: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=50, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> list[CommunicationOperationModel]:
+    statement = select(CommunicationOperationModel).where(
+        CommunicationOperationModel.tenant_id == x_tenant_id
+    )
+    if state is not None:
+        statement = statement.where(CommunicationOperationModel.state == state)
+    rows = await session.scalars(
+        statement.order_by(CommunicationOperationModel.created_at.desc()).limit(limit)
+    )
+    return list(rows.all())
+
+
+@router.get(
+    "/operations/{operation_id}",
+    response_model=Operation,
+    dependencies=[Depends(require_scope("communications.operations.read"))],
+)
+async def get_operation(
+    operation_id: UUID,
+    x_tenant_id: TenantHeader,
+    session: AsyncSession = Depends(get_session),
+) -> CommunicationOperationModel:
+    row = await session.scalar(
+        select(CommunicationOperationModel).where(
+            CommunicationOperationModel.id == operation_id,
+            CommunicationOperationModel.tenant_id == x_tenant_id,
+        )
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="operation_not_found")
+    return row
 
 
 @router.post(

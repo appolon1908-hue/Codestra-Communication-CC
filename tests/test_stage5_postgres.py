@@ -27,6 +27,8 @@ from app.main import (
     get_message,
     get_message_events,
     list_messages,
+    list_operations,
+    get_operation,
     create_suppression,
     create_template,
     delete_suppression,
@@ -178,6 +180,12 @@ async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts
             )
         ) == 1
         current_version = message.resource_version
+        operations = await list_operations(tenant_id, None, 50, session)
+        assert len(operations) == 1
+        assert (await get_operation(operations[0].id, tenant_id, session)).id == operations[0].id
+        with pytest.raises(HTTPException) as hidden:
+            await get_operation(operations[0].id, "other-tenant", session)
+        assert hidden.value.status_code == 404
     async with sessions() as session:
         pending = await cancel_message(
             message_id,

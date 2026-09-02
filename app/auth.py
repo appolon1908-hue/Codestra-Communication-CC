@@ -26,6 +26,7 @@ service_bearer = OAuth2(
                 "communications.suppression.read": "Read suppression state",
                 "communications.suppression.write": "Manage suppression state",
                 "communications.providers.read": "Read provider routing and health state",
+                "communications.operations.read": "Read durable communication operations",
                 "metrics.read": "Read private service metrics",
             },
         )

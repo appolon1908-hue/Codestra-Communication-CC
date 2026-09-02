@@ -307,6 +307,82 @@
         "title": "MessageEvent",
         "type": "object"
       },
+      "Operation": {
+        "properties": {
+          "attempts": {
+            "title": "Attempts",
+            "type": "integer"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "format": "uuid",
+            "title": "Message Id",
+            "type": "string"
+          },
+          "middleware_operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Middleware Operation Id"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "message_id",
+          "kind",
+          "state",
+          "attempts",
+          "middleware_operation_id",
+          "error_code",
+          "correlation_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "Operation",
+        "type": "object"
+      },
       "ProviderStatus": {
         "properties": {
           "channel": {
@@ -618,6 +694,7 @@
               "communications.cancel": "Cancel governed communication messages",
               "communications.consent.read": "Read communication consent state",
               "communications.consent.write": "Manage communication consent state",
+              "communications.operations.read": "Read durable communication operations",
               "communications.providers.read": "Read provider routing and health state",
               "communications.read": "Read communication messages and history",
               "communications.send": "Submit governed communication messages",
@@ -1382,6 +1459,145 @@
           }
         ],
         "summary": "Get Message Events"
+      }
+    },
+    "/v1/communications/operations": {
+      "get": {
+        "operationId": "list_operations_v1_communications_operations_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 32,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Operation"
+                  },
+                  "title": "Response List Operations V1 Communications Operations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "serviceBearer": [
+              "communications.operations.read"
+            ]
+          }
+        ],
+        "summary": "List Operations"
+      }
+    },
+    "/v1/communications/operations/{operation_id}": {
+      "get": {
+        "operationId": "get_operation_v1_communications_operations__operation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Operation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "serviceBearer": [
+              "communications.operations.read"
+            ]
+          }
+        ],
+        "summary": "Get Operation"
       }
     },
     "/v1/communications/providers": {
