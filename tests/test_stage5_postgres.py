@@ -37,6 +37,7 @@ from app.main import (
     revoke_consent,
     update_template,
     app,
+    metrics,
 )
 from app.models import (
     CommunicationAuditModel,
@@ -55,6 +56,18 @@ from app.middleware_client import MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.asyncio
+async def test_private_metrics_are_backed_by_current_database_state():
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        response = await metrics(session)
+    assert b"codestra_communication_delivery_outbox_records" in response.body
+    assert b"codestra_communication_operations" in response.body
+    assert b"codestra_communication_provider_inbox_records" in response.body
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

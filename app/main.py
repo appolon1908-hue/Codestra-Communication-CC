@@ -14,9 +14,9 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,7 @@ from .models import (
     SuppressionModel,
     TemplateModel,
 )
+from .metrics import DELIVERY_OUTBOX, HTTP_DURATION, HTTP_REQUESTS, OPERATIONS, PROVIDER_INBOX, render
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
 router = APIRouter(prefix="/v1/communications")
@@ -47,12 +48,20 @@ SERVICE = "codestra-communication"
 async def operational_headers(request: Request, call_next):
     correlation_id = request.headers.get("X-Correlation-ID") or str(uuid4())
     request.state.correlation_id = correlation_id
+    started = time.perf_counter()
     try:
         response = await call_next(request)
     except Exception:
         response = JSONResponse(status_code=500, content={"detail": "internal_error", "correlation_id": correlation_id})
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Correlation-ID"] = correlation_id
+    HTTP_REQUESTS.labels(
+        method=request.method if request.method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "OTHER",
+        status_class=f"{response.status_code // 100}xx",
+    ).inc()
+    HTTP_DURATION.labels(
+        method=request.method if request.method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "OTHER"
+    ).observe(time.perf_counter() - started)
     return response
 
 TenantHeader = Annotated[str, Header(alias="X-Tenant-ID", min_length=1, max_length=128)]
@@ -318,12 +327,14 @@ def _fingerprint(tenant_id: str, body: MessageCreate, recipient: str) -> str:
     ).hexdigest()
 
 
+@app.get("/health/live")
 @app.get("/health")
 def health(request: Request = None) -> dict[str, object]:
     correlation_id = getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))
     return {"status": "ok", "service": SERVICE, "timestamp": datetime.now(timezone.utc).isoformat(), "correlation_id": correlation_id}
 
 
+@app.get("/health/ready")
 @app.get("/ready")
 async def ready(request: Request, session: AsyncSession = Depends(get_session)):
     try:
@@ -331,6 +342,25 @@ async def ready(request: Request, session: AsyncSession = Depends(get_session)):
     except Exception:
         return JSONResponse(status_code=503, content={"status": "not_ready", "service": SERVICE, "dependencies": {"database": "unavailable"}, "correlation_id": request.state.correlation_id})
     return {"status": "ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready"}, "correlation_id": request.state.correlation_id}
+
+
+@app.get("/metrics", dependencies=[Depends(require_scope("metrics.read"))])
+async def metrics(session: AsyncSession = Depends(get_session)) -> Response:
+    bounded = {
+        DeliveryOutboxModel: (DELIVERY_OUTBOX, ("pending", "processing", "completed", "dead_letter")),
+        CommunicationOperationModel: (
+            OPERATIONS,
+            ("pending", "processing", "accepted", "failed", "reconciliation_required"),
+        ),
+        ProviderInboxModel: (PROVIDER_INBOX, ("processed", "dead_letter")),
+    }
+    for model, (gauge, states) in bounded.items():
+        rows = await session.execute(select(model.state, func.count()).group_by(model.state))
+        counts = {str(state): int(count) for state, count in rows.all()}
+        for state in states:
+            gauge.labels(state=state).set(counts.get(state, 0))
+    body, media_type = render()
+    return Response(content=body, media_type=media_type)
 
 
 @app.get("/version")

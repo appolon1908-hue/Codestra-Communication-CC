@@ -5,7 +5,9 @@ from app.main import BUSINESS_WRITES_ENABLED, app, capabilities, health, version
 
 
 def test_operational_endpoints_are_attributable_and_fail_closed():
-    assert {"/health", "/ready", "/version", "/capabilities"}.issubset(app.openapi()["paths"])
+    assert {
+        "/health", "/health/live", "/ready", "/health/ready", "/version", "/capabilities", "/metrics"
+    }.issubset(app.openapi()["paths"])
     assert health()["service"] == "codestra-communication"
     assert version()["service"] == "codestra-communication"
     value = capabilities()
