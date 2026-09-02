@@ -18,10 +18,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CODESTRA_MIGRATION_REVISION=005_delivery_control
 
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock requirements.lock ./
 COPY app ./app
 RUN case "${SOURCE_SHA}" in ????????????????????????????????????????) ;; *) exit 64 ;; esac \
-    && python -m pip install --no-cache-dir . \
+    && python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
     && addgroup -S -g 10001 codestra \
     && adduser -S -D -H -u 10001 -G codestra codestra \
     && chown -R 10001:10001 /app
