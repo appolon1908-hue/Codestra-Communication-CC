@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import os
+import re
+import stat
+from pathlib import Path
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+
+
+class DataProtectionError(RuntimeError):
+    pass
+
+
+_KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _b64decode(value: str) -> bytes:
+    try:
+        return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    except (ValueError, TypeError) as exc:
+        raise DataProtectionError("protected_value_invalid") from exc
+
+
+def _root() -> Path:
+    configured = os.getenv("COMMUNICATION_DATA_KEY_DIR", "").strip()
+    if not configured:
+        raise DataProtectionError("data_key_directory_missing")
+    root = Path(configured)
+    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+        raise DataProtectionError("data_key_directory_invalid")
+    return root.resolve()
+
+
+def _active_key_id() -> str:
+    value = os.getenv("COMMUNICATION_ACTIVE_DATA_KEY_ID", "").strip()
+    if not _KEY_ID.fullmatch(value):
+        raise DataProtectionError("active_data_key_id_invalid")
+    return value
+
+
+def _key(key_id: str) -> bytes:
+    if not _KEY_ID.fullmatch(key_id):
+        raise DataProtectionError("data_key_id_invalid")
+    root = _root()
+    path = root / f"{key_id}.key"
+    if path.is_symlink() or path.parent.resolve() != root or not path.is_file():
+        raise DataProtectionError("data_key_file_invalid")
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        raise DataProtectionError("data_key_permissions_invalid")
+    raw = path.read_bytes().strip()
+    if len(raw) != 32:
+        raw = _b64decode(raw.decode("ascii", "strict"))
+    if len(raw) != 32:
+        raise DataProtectionError("data_key_length_invalid")
+    return raw
+
+
+def _aad(*, tenant_id: str, purpose: str) -> bytes:
+    if not tenant_id or len(tenant_id) > 128 or not re.fullmatch(r"[a-z][a-z0-9_.-]{0,79}", purpose):
+        raise DataProtectionError("data_protection_context_invalid")
+    return f"codestra-communication\0v1\0{tenant_id}\0{purpose}".encode()
+
+
+def protect(value: str, *, tenant_id: str, purpose: str) -> str:
+    if not isinstance(value, str):
+        raise DataProtectionError("protected_value_invalid")
+    key_id = _active_key_id()
+    nonce = os.urandom(12)
+    ciphertext = AESGCM(_key(key_id)).encrypt(nonce, value.encode("utf-8"), _aad(tenant_id=tenant_id, purpose=purpose))
+    return f"v1:{key_id}:{_b64encode(nonce + ciphertext)}"
+
+
+def unprotect(envelope: str, *, tenant_id: str, purpose: str) -> str:
+    try:
+        version, key_id, encoded = envelope.split(":", 2)
+    except (AttributeError, ValueError) as exc:
+        raise DataProtectionError("protected_value_invalid") from exc
+    if version != "v1":
+        raise DataProtectionError("protected_value_version_unsupported")
+    packed = _b64decode(encoded)
+    if len(packed) < 29:
+        raise DataProtectionError("protected_value_invalid")
+    try:
+        cleartext = AESGCM(_key(key_id)).decrypt(
+            packed[:12], packed[12:], _aad(tenant_id=tenant_id, purpose=purpose)
+        )
+        return cleartext.decode("utf-8")
+    except Exception as exc:
+        raise DataProtectionError("protected_value_authentication_failed") from exc
+
+
+def blind_index(value: str, *, tenant_id: str, purpose: str) -> str:
+    active = _key(_active_key_id())
+    index_key = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=None,
+        info=b"codestra-communication-blind-index-v1",
+    ).derive(active)
+    material = _aad(tenant_id=tenant_id, purpose=purpose) + b"\0" + value.encode("utf-8")
+    return hmac.new(index_key, material, hashlib.sha256).hexdigest()
+
+
+def readiness() -> tuple[bool, str]:
+    try:
+        _key(_active_key_id())
+    except DataProtectionError as exc:
+        return False, str(exc)
+    return True, "ready"
