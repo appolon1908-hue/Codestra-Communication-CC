@@ -182,6 +182,7 @@ version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
+    { name = "cryptography" },
     { name = "dnspython" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -202,6 +203,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.30,<1" },
+    { name = "cryptography", specifier = ">=46,<51" },
     { name = "dnspython", specifier = ">=2.8,<3" },
     { name = "fastapi", specifier = ">=0.116,<1" },
     { name = "httpx", specifier = ">=0.28,<1" },
