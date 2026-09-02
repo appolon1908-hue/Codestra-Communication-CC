@@ -1,6 +1,6 @@
 import pytest
 
-from app.main import EXTERNAL_DELIVERY_ENABLED, TemplateRenderRequest, app, capabilities
+from app.main import EXTERNAL_DELIVERY_ENABLED, TemplateRenderRequest, app, capabilities, provider_health
 
 
 def test_committed_openapi_matches_runtime():
@@ -25,6 +25,8 @@ def test_canonical_communications_route_is_plural_and_stable():
     assert "/v1/communications/preferences" in paths
     assert "/v1/communications/recipients/{recipient_id}/preferences" in paths
     assert "/v1/communications/templates/{template_id}/render" in paths
+    assert "/v1/communications/provider-health" in paths
+    assert "/v1/communications/usage" in paths
     assert {"get", "put", "post"}.issubset(
         app.openapi()["paths"]["/v1/communications/preferences"]
     )
@@ -45,3 +47,10 @@ def test_template_render_variables_are_bounded():
         TemplateRenderRequest(variables={"bad variable": "x"})
     with pytest.raises(ValueError):
         TemplateRenderRequest(variables={f"v{i}": "x" for i in range(201)})
+
+
+def test_provider_health_reports_disabled_instead_of_fabricating_probe_success():
+    report = provider_health()
+    assert report.status == "disabled"
+    assert report.providers
+    assert {item.status for item in report.providers} == {"disabled"}

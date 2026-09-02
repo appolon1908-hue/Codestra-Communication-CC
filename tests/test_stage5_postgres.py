@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -48,6 +49,7 @@ from app.main import (
     update_template,
     app,
     metrics,
+    communication_usage,
 )
 from app.models import (
     CommunicationAuditModel,
@@ -145,6 +147,34 @@ async def test_private_metrics_are_backed_by_current_database_state():
     assert b"codestra_communication_delivery_outbox_records" in response.body
     assert b"codestra_communication_operations" in response.body
     assert b"codestra_communication_provider_inbox_records" in response.body
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_usage_is_derived_from_tenant_rows_and_time_window(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant = f"tenant-usage-{uuid.uuid4()}"
+    other = f"tenant-other-{uuid.uuid4()}"
+    async with sessions() as session:
+        created = await create_message(MessageCreate(
+            channel=Channel.EMAIL, recipient="usage@example.invalid",
+            template_key="transactional.test", purpose=Purpose.TRANSACTIONAL,
+        ), tenant, f"message-{uuid.uuid4()}", session)
+        created.status = "delivered"
+        await session.commit()
+        await create_message(MessageCreate(
+            channel=Channel.EMAIL, recipient="other@example.invalid",
+            template_key="transactional.test", purpose=Purpose.TRANSACTIONAL,
+        ), other, f"message-{uuid.uuid4()}", session)
+    now = datetime.now(timezone.utc)
+    async with sessions() as session:
+        report = await communication_usage(
+            tenant, now - timedelta(hours=1), now + timedelta(hours=1), Channel.EMAIL, session,
+        )
+        assert report.totals[0].accepted == 1
+        assert report.totals[0].delivered == 1
     await engine.dispose()
 
 

@@ -535,6 +535,66 @@
         "title": "PreferenceWrite",
         "type": "object"
       },
+      "ProviderHealth": {
+        "properties": {
+          "checkedAt": {
+            "format": "date-time",
+            "title": "Checkedat",
+            "type": "string"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderHealthItem"
+            },
+            "title": "Providers",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "checkedAt",
+          "providers"
+        ],
+        "title": "ProviderHealth",
+        "type": "object"
+      },
+      "ProviderHealthItem": {
+        "properties": {
+          "channel": {
+            "$ref": "#/components/schemas/Channel"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "channel",
+          "status"
+        ],
+        "title": "ProviderHealthItem",
+        "type": "object"
+      },
       "ProviderStatus": {
         "properties": {
           "channel": {
@@ -872,6 +932,66 @@
           "expected_version"
         ],
         "title": "TemplateUpdate",
+        "type": "object"
+      },
+      "UsageReport": {
+        "properties": {
+          "from": {
+            "format": "date-time",
+            "title": "From",
+            "type": "string"
+          },
+          "to": {
+            "format": "date-time",
+            "title": "To",
+            "type": "string"
+          },
+          "totals": {
+            "items": {
+              "$ref": "#/components/schemas/UsageTotal"
+            },
+            "title": "Totals",
+            "type": "array"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "totals"
+        ],
+        "title": "UsageReport",
+        "type": "object"
+      },
+      "UsageTotal": {
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "integer"
+          },
+          "channel": {
+            "$ref": "#/components/schemas/Channel"
+          },
+          "delivered": {
+            "title": "Delivered",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "suppressed": {
+            "title": "Suppressed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "channel",
+          "accepted",
+          "delivered",
+          "failed",
+          "suppressed"
+        ],
+        "title": "UsageTotal",
         "type": "object"
       },
       "ValidationError": {
@@ -2138,6 +2258,59 @@
         "summary": "Upsert Preference"
       }
     },
+    "/v1/communications/provider-health": {
+      "get": {
+        "operationId": "provider_health_v1_communications_provider_health_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderHealth"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "serviceBearer": [
+              "communications.providers.read"
+            ]
+          }
+        ],
+        "summary": "Provider Health"
+      }
+    },
     "/v1/communications/providers": {
       "get": {
         "operationId": "provider_statuses_v1_communications_providers_get",
@@ -2770,6 +2943,90 @@
           }
         ],
         "summary": "Render Template"
+      }
+    },
+    "/v1/communications/usage": {
+      "get": {
+        "operationId": "communication_usage_v1_communications_usage_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "from",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "From",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "to",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "To",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "channel",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Channel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Channel"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "serviceBearer": [
+              "communications.usage.read"
+            ]
+          }
+        ],
+        "summary": "Communication Usage"
       }
     },
     "/v1/webhooks/communications/{provider}/results": {

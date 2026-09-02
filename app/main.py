@@ -248,6 +248,33 @@ class ProviderStatus(BaseModel):
     direct_provider_credentials: bool = False
 
 
+class ProviderHealthItem(BaseModel):
+    provider: str
+    channel: Channel
+    status: str
+    reason: str | None = None
+
+
+class ProviderHealth(BaseModel):
+    status: str
+    checked_at: datetime = Field(serialization_alias="checkedAt")
+    providers: list[ProviderHealthItem]
+
+
+class UsageTotal(BaseModel):
+    channel: Channel
+    accepted: int
+    delivered: int
+    failed: int
+    suppressed: int
+
+
+class UsageReport(BaseModel):
+    from_at: datetime = Field(serialization_alias="from")
+    to: datetime
+    totals: list[UsageTotal]
+
+
 class Operation(BaseModel):
     id: UUID
     message_id: UUID
@@ -1605,6 +1632,61 @@ def provider_statuses() -> list[ProviderStatus]:
         )
         for channel in Channel
     ]
+
+
+@router.get(
+    "/provider-health",
+    response_model=ProviderHealth,
+    dependencies=[Depends(require_scope("communications.providers.read"))],
+)
+def provider_health() -> ProviderHealth:
+    status = "disabled" if not EXTERNAL_DELIVERY_ENABLED else "degraded"
+    reason = "external_delivery_disabled" if not EXTERNAL_DELIVERY_ENABLED else "runtime_probe_not_configured"
+    return ProviderHealth(
+        status=status,
+        checked_at=datetime.now(timezone.utc),
+        providers=[
+            ProviderHealthItem(provider="middleware", channel=channel, status=status, reason=reason)
+            for channel in Channel
+        ],
+    )
+
+
+@router.get(
+    "/usage",
+    response_model=UsageReport,
+    dependencies=[Depends(require_scope("communications.usage.read"))],
+)
+async def communication_usage(
+    x_tenant_id: TenantHeader,
+    from_at: datetime = Query(alias="from"),
+    to: datetime = Query(alias="to"),
+    channel: Channel | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> UsageReport:
+    if from_at.tzinfo is None or to.tzinfo is None or from_at >= to:
+        raise HTTPException(status_code=422, detail="usage_window_invalid")
+    selected = [channel] if channel is not None else list(Channel)
+    totals: list[UsageTotal] = []
+    for item in selected:
+        rows = await session.execute(
+            select(MessageModel.status, func.count()).where(
+                MessageModel.tenant_id == x_tenant_id,
+                MessageModel.channel == item.value,
+                MessageModel.created_at >= from_at,
+                MessageModel.created_at < to,
+            ).group_by(MessageModel.status)
+        )
+        counts = {str(state): int(count) for state, count in rows.all()}
+        failed = sum(counts.get(state, 0) for state in ("failed", "delivery_failed", "bounced", "complained"))
+        totals.append(UsageTotal(
+            channel=item,
+            accepted=sum(counts.values()) - counts.get("suppressed", 0),
+            delivered=counts.get("delivered", 0),
+            failed=failed,
+            suppressed=counts.get("suppressed", 0),
+        ))
+    return UsageReport(from_at=from_at, to=to, totals=totals)
 
 
 @app.post("/v1/webhooks/communications/{provider}/results", status_code=202)
