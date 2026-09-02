@@ -37,6 +37,11 @@
           "channel": {
             "$ref": "#/components/schemas/Channel"
           },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
           "resource_version": {
             "title": "Resource Version",
             "type": "integer"
@@ -55,6 +60,7 @@
           }
         },
         "required": [
+          "id",
           "subject_key",
           "channel",
           "status",

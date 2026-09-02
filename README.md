@@ -15,7 +15,16 @@ same immutable image:
 
 Apply migrations using the one-shot migration process before starting a new
 release. Normal application startup never performs migrations. The current
-schema identity is `006_event_outbox`.
+schema identity is `009_data_protection_columns`.
+
+Recipient identifiers, consent/preference subjects, template content, and
+delivery commands are encrypted with AES-256-GCM before persistence. Set
+`COMMUNICATION_DATA_KEY_DIR` to an absolute, non-symlinked directory containing
+mode-0600 `<key-id>.key` files and set `COMMUNICATION_ACTIVE_DATA_KEY_ID` to the
+write key. The service keeps older key files only for rotation-time reads and
+reports not-ready when the active key cannot be loaded. Legacy plaintext reads
+are disabled by default and exist only as a bounded migration compatibility
+mode.
 
 Business writes and external delivery fail closed by default. Event payloads
 contain tenant and aggregate identifiers, lifecycle state, and correlation

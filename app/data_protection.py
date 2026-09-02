@@ -116,3 +116,15 @@ def readiness() -> tuple[bool, str]:
     except DataProtectionError as exc:
         return False, str(exc)
     return True, "ready"
+
+
+def reveal(
+    *, ciphertext: str | None, legacy_plaintext: str | None,
+    tenant_id: str, purpose: str,
+) -> str:
+    if ciphertext:
+        return unprotect(ciphertext, tenant_id=tenant_id, purpose=purpose)
+    allow_legacy = os.getenv("COMMUNICATION_ALLOW_LEGACY_PLAINTEXT_READS", "false").lower() == "true"
+    if allow_legacy and legacy_plaintext is not None:
+        return legacy_plaintext
+    raise DataProtectionError("protected_value_missing")

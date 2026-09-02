@@ -78,6 +78,7 @@ from app.models import (
     TemplateModel,
 )
 from app.delivery_worker import run_once as run_delivery_once
+from app.data_protection import reveal
 from app.event_worker import acknowledge, claim, reject
 from app.middleware_client import MiddlewareDeliveryError, MiddlewareResult
 from sqlalchemy import func, select
@@ -163,6 +164,10 @@ async def test_preferences_are_tenant_scoped_versioned_and_idempotent(monkeypatc
         created = await upsert_preference(body, tenant, idem, session)
         assert created.subject == "person@example.invalid"
         assert created.resource_version == 1
+        stored = await session.get(PreferenceModel, created.preference_id)
+        assert stored.subject is None
+        assert stored.subject_hash
+        assert "person@example.invalid" not in stored.subject_ciphertext
     async with sessions() as session:
         replay = await upsert_preference(body, tenant, idem, session)
         assert replay.preference_id == created.preference_id
@@ -341,6 +346,14 @@ async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts
         )
         message_id = message.id
         assert message.status == "queued" and message.operation_id is not None
+        stored = await session.get(MessageModel, message_id)
+        outbox = await session.scalar(select(DeliveryOutboxModel).where(
+            DeliveryOutboxModel.operation_id == message.operation_id
+        ))
+        assert stored.recipient is None and stored.recipient_hash
+        assert "@example.invalid" not in stored.recipient_ciphertext
+        assert "@example.invalid" not in outbox.payload_json
+        assert outbox.payload_json.startswith("v1:")
 
     class Client:
         async def dispatch(self, payload):
@@ -387,7 +400,11 @@ async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts
                 DeliveryOutboxModel.operation_id == cancel_operation.id
             )
         )
-        assert json.loads(cancel_outbox.payload_json)["delivery_operation_id"] == (
+        cancel_payload = json.loads(reveal(
+            ciphertext=cancel_outbox.payload_json, legacy_plaintext=None,
+            tenant_id=tenant_id, purpose="delivery-payload",
+        ))
+        assert cancel_payload["delivery_operation_id"] == (
             "middleware-delivery-operation"
         )
 

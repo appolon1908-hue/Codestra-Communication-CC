@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, or_, select
 
+from .data_protection import DataProtectionError, reveal
 from .db import SessionLocal
 from .middleware_client import MiddlewareCommunicationClient, MiddlewareDeliveryError, MiddlewareResult
 from .events import record_message_event
@@ -29,6 +30,22 @@ class Claim:
     operation_id: UUID
     attempts: int
     payload: dict[str, object]
+
+
+def _payload(row: DeliveryOutboxModel) -> dict[str, object]:
+    cleartext = reveal(
+        ciphertext=row.payload_json if row.payload_json.startswith("v1:") else None,
+        legacy_plaintext=None if row.payload_json.startswith("v1:") else row.payload_json,
+        tenant_id=row.tenant_id,
+        purpose="delivery-payload",
+    )
+    try:
+        decoded = json.loads(cleartext)
+    except (TypeError, ValueError) as exc:
+        raise DataProtectionError("protected_payload_invalid") from exc
+    if not isinstance(decoded, dict):
+        raise DataProtectionError("protected_payload_invalid")
+    return decoded
 
 
 def capability_enabled() -> bool:
@@ -63,9 +80,19 @@ async def claim_one(lease_seconds: int, *, session_factory=SessionLocal) -> Clai
             row.last_error_code = "operation_missing"
             await session.commit()
             return None
+        try:
+            payload = _payload(row)
+        except DataProtectionError:
+            row.state = "dead_letter"
+            row.lease_until = None
+            row.last_error_code = "data_protection_unavailable"
+            operation.state = "failed"
+            operation.error_code = "data_protection_unavailable"
+            await session.commit()
+            return None
         operation.attempts = row.attempts
         await session.commit()
-        return Claim(row.id, row.operation_id, row.attempts, json.loads(row.payload_json))
+        return Claim(row.id, row.operation_id, row.attempts, payload)
 
 
 async def complete(
@@ -256,7 +283,12 @@ async def run_once(
             # Replay the exact original command with its original operation UUID as
             # the Middleware Idempotency-Key. Middleware returns the pre-existing
             # operation when it accepted the ambiguous request, without another effect.
-            dispatch_payload = json.loads(original.payload_json)
+            try:
+                dispatch_payload = _payload(original)
+            except DataProtectionError as exc:
+                raise MiddlewareDeliveryError(
+                    "data_protection_unavailable", retryable=False
+                ) from exc
         result = await client.dispatch(dispatch_payload)
     except MiddlewareDeliveryError as exc:
         await fail(claim, exc, max_attempts, session_factory=session_factory)

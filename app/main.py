@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +41,7 @@ from .models import (
 )
 from .events import record_message_event
 from .domain_verifier import DomainVerificationUnavailable, verify_domain_dns
+from .data_protection import DataProtectionError, blind_index, protect, readiness as data_protection_readiness, reveal
 from .metrics import DELIVERY_OUTBOX, HTTP_DURATION, HTTP_REQUESTS, OPERATIONS, PROVIDER_INBOX, render
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
@@ -206,6 +207,7 @@ class ConsentChange(BaseModel):
 
 
 class Consent(BaseModel):
+    id: UUID
     subject_key: str
     channel: Channel
     status: str
@@ -373,6 +375,34 @@ def _require_business_writes() -> None:
         raise HTTPException(status_code=423, detail="business_writes_disabled")
 
 
+def _protect_value(value: str, *, tenant_id: str, purpose: str) -> tuple[str, str]:
+    try:
+        return (
+            protect(value, tenant_id=tenant_id, purpose=purpose),
+            blind_index(value, tenant_id=tenant_id, purpose=purpose),
+        )
+    except DataProtectionError as exc:
+        raise HTTPException(status_code=503, detail="data_protection_unavailable") from exc
+
+
+def _reveal_value(
+    ciphertext: str | None, legacy_plaintext: str | None, *, tenant_id: str, purpose: str
+) -> str:
+    try:
+        return reveal(
+            ciphertext=ciphertext, legacy_plaintext=legacy_plaintext,
+            tenant_id=tenant_id, purpose=purpose,
+        )
+    except DataProtectionError as exc:
+        raise HTTPException(status_code=503, detail="data_protection_unavailable") from exc
+
+
+def _protected_match(hash_column, legacy_column, value_hash: str, legacy_value: str):
+    if os.getenv("COMMUNICATION_ALLOW_LEGACY_PLAINTEXT_READS", "false").lower() == "true":
+        return or_(hash_column == value_hash, legacy_column == legacy_value)
+    return hash_column == value_hash
+
+
 def _actor(request: Request | None) -> str:
     principal = getattr(getattr(request, "state", None), "principal", None)
     return getattr(principal, "subject", "codestra-communication-internal")[:160]
@@ -523,7 +553,20 @@ async def ready(request: Request, session: AsyncSession = Depends(get_session)):
         await asyncio.wait_for(session.execute(select(1)), timeout=2.0)
     except Exception:
         return JSONResponse(status_code=503, content={"status": "not_ready", "service": SERVICE, "dependencies": {"database": "unavailable"}, "correlation_id": request.state.correlation_id})
-    return {"status": "ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready"}, "correlation_id": request.state.correlation_id}
+    protected_ready, protected_reason = data_protection_readiness()
+    if not protected_ready:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready", "service": SERVICE,
+                "dependencies": {
+                    "database": "ready", "configuration": "ready",
+                    "data_protection": protected_reason,
+                },
+                "correlation_id": request.state.correlation_id,
+            },
+        )
+    return {"status": "ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready", "data_protection": "ready"}, "correlation_id": request.state.correlation_id}
 
 
 @app.get("/metrics", dependencies=[Depends(require_scope("metrics.read"))])
@@ -562,6 +605,7 @@ def version(request: Request = None) -> dict[str, object]:
 @router.get("/capabilities")
 def capabilities(request: Request = None) -> dict[str, object]:
     correlation_id = getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))
+    protected_ready, _ = data_protection_readiness()
     return {
         "service": SERVICE,
         "maintenance_mode": os.getenv("MAINTENANCE_MODE", "false").lower() == "true",
@@ -580,6 +624,7 @@ def capabilities(request: Request = None) -> dict[str, object]:
         "push": True,
         "consent_enforcement": True,
         "suppression_enforcement": True,
+        "data_protection_configured": protected_ready,
         "external_delivery": EXTERNAL_DELIVERY_ENABLED,
         "correlation_id": correlation_id,
     }
@@ -606,6 +651,15 @@ async def create_message(
     if not recipient:
         raise HTTPException(status_code=400, detail="recipient_invalid")
     fingerprint = _fingerprint(tenant_id, body, recipient)
+    recipient_ciphertext, recipient_hash = _protect_value(
+        recipient, tenant_id=tenant_id, purpose="message-recipient"
+    )
+    suppression_hash = _protect_value(
+        recipient, tenant_id=tenant_id, purpose="suppression-recipient"
+    )[1]
+    consent_hash = _protect_value(
+        recipient, tenant_id=tenant_id, purpose="consent-subject"
+    )[1]
 
     existing = await session.execute(
         select(MessageModel).where(
@@ -623,7 +677,10 @@ async def create_message(
         select(SuppressionModel).where(
             SuppressionModel.tenant_id == tenant_id,
             SuppressionModel.channel == body.channel.value,
-            SuppressionModel.recipient == recipient,
+            _protected_match(
+                SuppressionModel.recipient_hash, SuppressionModel.recipient,
+                suppression_hash, recipient,
+            ),
             SuppressionModel.active.is_(True),
         )
     )
@@ -634,7 +691,10 @@ async def create_message(
         consent = await session.execute(
             select(ConsentModel).where(
                 ConsentModel.tenant_id == tenant_id,
-                ConsentModel.subject_key == recipient,
+                _protected_match(
+                    ConsentModel.subject_hash, ConsentModel.subject_key,
+                    consent_hash, recipient,
+                ),
                 ConsentModel.channel == body.channel.value,
                 ConsentModel.status == "granted",
             ).with_for_update()
@@ -645,7 +705,9 @@ async def create_message(
     row = MessageModel(
         tenant_id=tenant_id,
         channel=body.channel.value,
-        recipient=recipient,
+        recipient=None,
+        recipient_ciphertext=recipient_ciphertext,
+        recipient_hash=recipient_hash,
         template_key=body.template_key,
         purpose=body.purpose.value,
         idempotency_key=idempotency_key,
@@ -671,12 +733,12 @@ async def create_message(
                 DeliveryOutboxModel(
                     tenant_id=tenant_id,
                     operation_id=operation.id,
-                    payload_json=json.dumps(
+                    payload_json=_protect_value(json.dumps(
                         {
                             "operation_id": str(operation.id),
                             "message_id": str(row.id),
                             "channel": row.channel,
-                            "recipient": row.recipient,
+                            "recipient": recipient,
                             "template_key": row.template_key,
                             "purpose": row.purpose,
                             "tenant_id": tenant_id,
@@ -684,7 +746,7 @@ async def create_message(
                         },
                         sort_keys=True,
                         separators=(",", ":"),
-                    ),
+                    ), tenant_id=tenant_id, purpose="delivery-payload")[0],
                 )
             )
         await _message_event(
@@ -903,7 +965,7 @@ async def reconcile_operation(
         DeliveryOutboxModel(
             tenant_id=x_tenant_id,
             operation_id=operation.id,
-            payload_json=json.dumps(
+            payload_json=_protect_value(json.dumps(
                 {
                     "action": "reconcile",
                     "operation_id": str(operation.id),
@@ -916,7 +978,7 @@ async def reconcile_operation(
                 },
                 sort_keys=True,
                 separators=(",", ":"),
-            ),
+            ), tenant_id=x_tenant_id, purpose="delivery-payload")[0],
         )
     )
     _audit_domain(
@@ -1032,7 +1094,7 @@ async def cancel_message(
             DeliveryOutboxModel(
                 tenant_id=x_tenant_id,
                 operation_id=cancel_operation.id,
-                payload_json=json.dumps(
+                payload_json=_protect_value(json.dumps(
                     {
                         "operation_id": str(cancel_operation.id),
                         "delivery_operation_id": middleware_operation_id,
@@ -1044,7 +1106,7 @@ async def cancel_message(
                     },
                     sort_keys=True,
                     separators=(",", ":"),
-                ),
+                ), tenant_id=x_tenant_id, purpose="delivery-payload")[0],
             )
         )
     await _message_event(
@@ -1076,7 +1138,7 @@ async def create_template(
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
     request: Request = None,
-) -> TemplateModel:
+) -> Template:
     _require_business_writes()
     payload = body.model_dump(mode="json")
     fingerprint = _domain_fingerprint("template.create", f"{body.key}:{body.locale}", payload)
@@ -1089,14 +1151,23 @@ async def create_template(
     if prior is not None:
         if prior.request_fingerprint != fingerprint:
             raise HTTPException(status_code=409, detail="idempotency_conflict")
-        return prior
+        return _template_response(prior)
+    subject_ciphertext = (
+        _protect_value(body.subject_template, tenant_id=x_tenant_id, purpose="template-subject")[0]
+        if body.subject_template is not None else None
+    )
+    body_ciphertext = _protect_value(
+        body.body_template, tenant_id=x_tenant_id, purpose="template-body"
+    )[0]
     row = TemplateModel(
         tenant_id=x_tenant_id,
         key=body.key,
         channel=body.channel.value,
         locale=body.locale,
-        subject_template=body.subject_template,
-        body_template=body.body_template,
+        subject_template=None,
+        body_template=None,
+        subject_ciphertext=subject_ciphertext,
+        body_ciphertext=body_ciphertext,
         idempotency_key=idempotency_key,
         request_fingerprint=fingerprint,
     )
@@ -1118,9 +1189,32 @@ async def create_template(
         )
         if replay is None or replay.request_fingerprint != fingerprint:
             raise HTTPException(status_code=409, detail="template_key_conflict") from exc
-        return replay
+        return _template_response(replay)
     await session.refresh(row)
-    return row
+    return _template_response(row)
+
+
+def _template_values(row: TemplateModel) -> tuple[str | None, str]:
+    subject = None
+    if row.subject_ciphertext is not None or row.subject_template is not None:
+        subject = _reveal_value(
+            row.subject_ciphertext, row.subject_template,
+            tenant_id=row.tenant_id, purpose="template-subject",
+        )
+    body = _reveal_value(
+        row.body_ciphertext, row.body_template,
+        tenant_id=row.tenant_id, purpose="template-body",
+    )
+    return subject, body
+
+
+def _template_response(row: TemplateModel) -> Template:
+    subject, body = _template_values(row)
+    return Template(
+        id=row.id, key=row.key, channel=Channel(row.channel), locale=row.locale,
+        subject_template=subject, body_template=body, active=row.active,
+        resource_version=row.resource_version,
+    )
 
 
 @router.get(
@@ -1131,11 +1225,11 @@ async def create_template(
 async def list_templates(
     x_tenant_id: TenantHeader,
     session: AsyncSession = Depends(get_session),
-) -> list[TemplateModel]:
+) -> list[Template]:
     rows = await session.scalars(
         select(TemplateModel).where(TemplateModel.tenant_id == x_tenant_id).order_by(TemplateModel.key)
     )
-    return list(rows.all())
+    return [_template_response(row) for row in rows.all()]
 
 
 @router.get(
@@ -1147,13 +1241,13 @@ async def get_template(
     template_id: UUID,
     x_tenant_id: TenantHeader,
     session: AsyncSession = Depends(get_session),
-) -> TemplateModel:
+) -> Template:
     row = await session.scalar(
         select(TemplateModel).where(TemplateModel.id == template_id, TemplateModel.tenant_id == x_tenant_id)
     )
     if row is None:
         raise HTTPException(status_code=404, detail="template_not_found")
-    return row
+    return _template_response(row)
 
 
 @router.post(
@@ -1175,9 +1269,10 @@ async def render_template(
     if row is None:
         raise HTTPException(status_code=404, detail="template_not_found")
     pattern = re.compile(r"{{\s*([A-Za-z][A-Za-z0-9_.-]{0,79})\s*}}")
-    names = set(pattern.findall(row.body_template))
-    if row.subject_template:
-        names.update(pattern.findall(row.subject_template))
+    subject_template, body_template = _template_values(row)
+    names = set(pattern.findall(body_template))
+    if subject_template:
+        names.update(pattern.findall(subject_template))
     missing = sorted(names - body.variables.keys())
     def substitute(value: str | None) -> str | None:
         if value is None:
@@ -1188,8 +1283,8 @@ async def render_template(
             value,
         )
     return TemplateRenderResult(
-        subject=substitute(row.subject_template),
-        body=substitute(row.body_template) or "",
+        subject=substitute(subject_template),
+        body=substitute(body_template) or "",
         missing_variables=missing,
     )
 
@@ -1206,7 +1301,7 @@ async def update_template(
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
     request: Request = None,
-) -> TemplateModel:
+) -> Template:
     _require_business_writes()
     row = await session.scalar(
         select(TemplateModel)
@@ -1221,15 +1316,22 @@ async def update_template(
         kind="template.update", idempotency_key=idempotency_key, payload=payload,
         result_version=row.resource_version + 1,
     ):
-        return row
+        return _template_response(row)
     if row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
     if "subject_template" in body.model_fields_set:
-        row.subject_template = body.subject_template
-    for field in ("body_template", "active"):
-        value = getattr(body, field)
-        if field in body.model_fields_set and value is not None:
-            setattr(row, field, value)
+        row.subject_template = None
+        row.subject_ciphertext = (
+            _protect_value(body.subject_template, tenant_id=x_tenant_id, purpose="template-subject")[0]
+            if body.subject_template is not None else None
+        )
+    if "body_template" in body.model_fields_set and body.body_template is not None:
+        row.body_template = None
+        row.body_ciphertext = _protect_value(
+            body.body_template, tenant_id=x_tenant_id, purpose="template-body"
+        )[0]
+    if "active" in body.model_fields_set and body.active is not None:
+        row.active = body.active
     row.resource_version += 1
     _audit_domain(
         session, tenant_id=x_tenant_id, aggregate_type="template", aggregate_id=row.id,
@@ -1237,7 +1339,7 @@ async def update_template(
     )
     await session.commit()
     await session.refresh(row)
-    return row
+    return _template_response(row)
 
 
 @router.post(
@@ -1251,14 +1353,19 @@ async def grant_consent(
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
     request: Request = None,
-) -> ConsentModel:
+) -> Consent:
     _require_business_writes()
     subject = _recipient(body.subject_key, body.channel)
+    subject_ciphertext, subject_hash = _protect_value(
+        subject, tenant_id=x_tenant_id, purpose="consent-subject"
+    )
     row = await session.scalar(
         select(ConsentModel)
         .where(
             ConsentModel.tenant_id == x_tenant_id,
-            ConsentModel.subject_key == subject,
+            _protected_match(
+                ConsentModel.subject_hash, ConsentModel.subject_key, subject_hash, subject
+            ),
             ConsentModel.channel == body.channel.value,
         )
         .with_for_update()
@@ -1271,10 +1378,12 @@ async def grant_consent(
         idempotency_key=idempotency_key, payload=payload, result_version=version,
     ):
         assert row is not None
-        return row
+        return _consent_response(row)
     if row is None:
         row = ConsentModel(
-            tenant_id=x_tenant_id, subject_key=subject, channel=body.channel.value,
+            tenant_id=x_tenant_id, subject_key=None,
+            subject_ciphertext=subject_ciphertext, subject_hash=subject_hash,
+            channel=body.channel.value,
             status="granted", source=body.source, evidence=body.evidence,
             idempotency_key=idempotency_key,
             request_fingerprint=_domain_fingerprint("consent.grant", subject, payload),
@@ -1287,6 +1396,9 @@ async def grant_consent(
         row.status = "granted"
         row.source = body.source
         row.evidence = body.evidence
+        row.subject_key = None
+        row.subject_ciphertext = subject_ciphertext
+        row.subject_hash = subject_hash
         row.resource_version += 1
     try:
         await session.flush()
@@ -1307,7 +1419,9 @@ async def grant_consent(
         winner = await session.scalar(
             select(ConsentModel).where(
                 ConsentModel.tenant_id == x_tenant_id,
-                ConsentModel.subject_key == subject,
+                _protected_match(
+                    ConsentModel.subject_hash, ConsentModel.subject_key, subject_hash, subject
+                ),
                 ConsentModel.channel == body.channel.value,
             )
         )
@@ -1316,9 +1430,21 @@ async def grant_consent(
         )
         if mutation is None or mutation.request_fingerprint != expected or winner is None:
             raise HTTPException(status_code=409, detail="consent_conflict") from exc
-        return winner
+        return _consent_response(winner)
     await session.refresh(row)
-    return row
+    return _consent_response(row)
+
+
+def _consent_response(row: ConsentModel) -> Consent:
+    return Consent(
+        id=row.id,
+        subject_key=_reveal_value(
+            row.subject_ciphertext, row.subject_key,
+            tenant_id=row.tenant_id, purpose="consent-subject",
+        ),
+        channel=Channel(row.channel), status=row.status, source=row.source,
+        resource_version=row.resource_version,
+    )
 
 
 @router.get(
@@ -1330,12 +1456,12 @@ async def list_consents(
     x_tenant_id: TenantHeader,
     status_filter: str | None = Query(default=None, alias="status", max_length=24),
     session: AsyncSession = Depends(get_session),
-) -> list[ConsentModel]:
+) -> list[Consent]:
     statement = select(ConsentModel).where(ConsentModel.tenant_id == x_tenant_id)
     if status_filter:
         statement = statement.where(ConsentModel.status == status_filter)
     rows = await session.scalars(statement.order_by(ConsentModel.updated_at.desc()).limit(100))
-    return list(rows.all())
+    return [_consent_response(row) for row in rows.all()]
 
 
 @router.post(
@@ -1349,14 +1475,19 @@ async def revoke_consent(
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
     request: Request = None,
-) -> ConsentModel:
+) -> Consent:
     _require_business_writes()
     subject = _recipient(body.subject_key, body.channel)
+    subject_hash = _protect_value(
+        subject, tenant_id=x_tenant_id, purpose="consent-subject"
+    )[1]
     row = await session.scalar(
         select(ConsentModel)
         .where(
             ConsentModel.tenant_id == x_tenant_id,
-            ConsentModel.subject_key == subject,
+            _protected_match(
+                ConsentModel.subject_hash, ConsentModel.subject_key, subject_hash, subject
+            ),
             ConsentModel.channel == body.channel.value,
         )
         .with_for_update()
@@ -1369,7 +1500,7 @@ async def revoke_consent(
         aggregate_key=f"{body.channel.value}:{subject}", kind="consent.revoke",
         idempotency_key=idempotency_key, payload=payload, result_version=row.resource_version + 1,
     ):
-        return row
+        return _consent_response(row)
     if body.expected_version is None or row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
     row.status = "revoked"
@@ -1382,13 +1513,16 @@ async def revoke_consent(
     )
     await session.commit()
     await session.refresh(row)
-    return row
+    return _consent_response(row)
 
 
 def _preference_response(row: PreferenceModel) -> Preference:
     return Preference(
         preference_id=row.id,
-        subject=row.subject,
+        subject=_reveal_value(
+            row.subject_ciphertext, row.subject,
+            tenant_id=row.tenant_id, purpose="preference-subject",
+        ),
         channel=Channel(row.channel),
         topic=row.topic or None,
         consent=row.consent,
@@ -1413,7 +1547,14 @@ async def list_preferences(
 ) -> PreferenceList:
     statement = select(PreferenceModel).where(PreferenceModel.tenant_id == x_tenant_id)
     if subject is not None:
-        statement = statement.where(PreferenceModel.subject == subject.strip())
+        normalized_subject = subject.strip()
+        subject_hash = _protect_value(
+            normalized_subject, tenant_id=x_tenant_id, purpose="preference-subject"
+        )[1]
+        statement = statement.where(_protected_match(
+            PreferenceModel.subject_hash, PreferenceModel.subject,
+            subject_hash, normalized_subject,
+        ))
     if cursor is not None:
         statement = statement.where(PreferenceModel.id > cursor)
     rows = list((await session.scalars(statement.order_by(PreferenceModel.id).limit(limit + 1))).all())
@@ -1435,10 +1576,17 @@ async def get_recipient_preferences(
 ) -> PreferenceList:
     if not recipient_id.strip() or len(recipient_id) > 300:
         raise HTTPException(status_code=422, detail="recipient_invalid")
+    normalized_subject = recipient_id.strip()
+    subject_hash = _protect_value(
+        normalized_subject, tenant_id=x_tenant_id, purpose="preference-subject"
+    )[1]
     rows = list((await session.scalars(
         select(PreferenceModel).where(
             PreferenceModel.tenant_id == x_tenant_id,
-            PreferenceModel.subject == recipient_id.strip(),
+            _protected_match(
+                PreferenceModel.subject_hash, PreferenceModel.subject,
+                subject_hash, normalized_subject,
+            ),
         ).order_by(PreferenceModel.id).limit(100)
     )).all())
     return PreferenceList(items=[_preference_response(row) for row in rows])
@@ -1463,6 +1611,9 @@ async def upsert_preference(
 ) -> Preference:
     _require_business_writes()
     subject = _recipient(body.subject, body.channel)
+    subject_ciphertext, subject_hash = _protect_value(
+        subject, tenant_id=x_tenant_id, purpose="preference-subject"
+    )
     topic = body.topic or ""
     encoded_metadata = json.dumps(body.metadata, sort_keys=True, separators=(",", ":"))
     if len(encoded_metadata.encode("utf-8")) > 8192:
@@ -1472,7 +1623,9 @@ async def upsert_preference(
     row = await session.scalar(
         select(PreferenceModel).where(
             PreferenceModel.tenant_id == x_tenant_id,
-            PreferenceModel.subject == subject,
+            _protected_match(
+                PreferenceModel.subject_hash, PreferenceModel.subject, subject_hash, subject
+            ),
             PreferenceModel.channel == body.channel.value,
             PreferenceModel.topic == topic,
         ).with_for_update()
@@ -1487,7 +1640,9 @@ async def upsert_preference(
         if row is None:
             row = await session.scalar(select(PreferenceModel).where(
                 PreferenceModel.tenant_id == x_tenant_id,
-                PreferenceModel.subject == subject,
+                _protected_match(
+                    PreferenceModel.subject_hash, PreferenceModel.subject, subject_hash, subject
+                ),
                 PreferenceModel.channel == body.channel.value,
                 PreferenceModel.topic == topic,
             ))
@@ -1498,7 +1653,9 @@ async def upsert_preference(
         if body.expected_version is not None:
             raise HTTPException(status_code=409, detail="preference_not_found_for_expected_version")
         row = PreferenceModel(
-            tenant_id=x_tenant_id, subject=subject, channel=body.channel.value,
+            tenant_id=x_tenant_id, subject=None,
+            subject_ciphertext=subject_ciphertext, subject_hash=subject_hash,
+            channel=body.channel.value,
             topic=topic, consent=body.consent, source=body.source,
             metadata_json=encoded_metadata, idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
@@ -1511,6 +1668,9 @@ async def upsert_preference(
         row.source = body.source
         row.metadata_json = encoded_metadata
         row.request_fingerprint = fingerprint
+        row.subject = None
+        row.subject_ciphertext = subject_ciphertext
+        row.subject_hash = subject_hash
         row.resource_version += 1
     try:
         await session.flush()
@@ -1528,7 +1688,9 @@ async def upsert_preference(
         ))
         winner = await session.scalar(select(PreferenceModel).where(
             PreferenceModel.tenant_id == x_tenant_id,
-            PreferenceModel.subject == subject,
+            _protected_match(
+                PreferenceModel.subject_hash, PreferenceModel.subject, subject_hash, subject
+            ),
             PreferenceModel.channel == body.channel.value,
             PreferenceModel.topic == topic,
         ))
@@ -1860,15 +2022,21 @@ async def create_suppression(
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
     request: Request = None,
-) -> SuppressionModel:
+) -> Suppression:
     _require_business_writes()
     recipient = _recipient(body.recipient, body.channel)
+    recipient_ciphertext, recipient_hash = _protect_value(
+        recipient, tenant_id=x_tenant_id, purpose="suppression-recipient"
+    )
     row = await session.scalar(
         select(SuppressionModel)
         .where(
             SuppressionModel.tenant_id == x_tenant_id,
             SuppressionModel.channel == body.channel.value,
-            SuppressionModel.recipient == recipient,
+            _protected_match(
+                SuppressionModel.recipient_hash, SuppressionModel.recipient,
+                recipient_hash, recipient,
+            ),
         )
         .with_for_update()
     )
@@ -1880,10 +2048,11 @@ async def create_suppression(
         idempotency_key=idempotency_key, payload=payload, result_version=version,
     ):
         assert row is not None
-        return row
+        return _suppression_response(row)
     if row is None:
         row = SuppressionModel(
-            tenant_id=x_tenant_id, channel=body.channel.value, recipient=recipient,
+            tenant_id=x_tenant_id, channel=body.channel.value, recipient=None,
+            recipient_ciphertext=recipient_ciphertext, recipient_hash=recipient_hash,
             reason=body.reason, active=True, idempotency_key=idempotency_key,
             request_fingerprint=_domain_fingerprint("suppression.create", recipient, payload),
         )
@@ -1891,6 +2060,9 @@ async def create_suppression(
     else:
         row.active = True
         row.reason = body.reason
+        row.recipient = None
+        row.recipient_ciphertext = recipient_ciphertext
+        row.recipient_hash = recipient_hash
         row.resource_version += 1
     try:
         await session.flush()
@@ -1912,7 +2084,10 @@ async def create_suppression(
             select(SuppressionModel).where(
                 SuppressionModel.tenant_id == x_tenant_id,
                 SuppressionModel.channel == body.channel.value,
-                SuppressionModel.recipient == recipient,
+                _protected_match(
+                    SuppressionModel.recipient_hash, SuppressionModel.recipient,
+                    recipient_hash, recipient,
+                ),
             )
         )
         expected = _domain_fingerprint(
@@ -1920,9 +2095,20 @@ async def create_suppression(
         )
         if mutation is None or mutation.request_fingerprint != expected or winner is None:
             raise HTTPException(status_code=409, detail="suppression_conflict") from exc
-        return winner
+        return _suppression_response(winner)
     await session.refresh(row)
-    return row
+    return _suppression_response(row)
+
+
+def _suppression_response(row: SuppressionModel) -> Suppression:
+    return Suppression(
+        id=row.id, channel=Channel(row.channel),
+        recipient=_reveal_value(
+            row.recipient_ciphertext, row.recipient,
+            tenant_id=row.tenant_id, purpose="suppression-recipient",
+        ),
+        reason=row.reason, active=row.active, resource_version=row.resource_version,
+    )
 
 
 @router.get(
@@ -1933,13 +2119,13 @@ async def create_suppression(
 async def list_suppressions(
     x_tenant_id: TenantHeader,
     session: AsyncSession = Depends(get_session),
-) -> list[SuppressionModel]:
+) -> list[Suppression]:
     rows = await session.scalars(
         select(SuppressionModel).where(
             SuppressionModel.tenant_id == x_tenant_id, SuppressionModel.active.is_(True)
         ).order_by(SuppressionModel.created_at.desc()).limit(100)
     )
-    return list(rows.all())
+    return [_suppression_response(row) for row in rows.all()]
 
 
 @router.delete(
@@ -1954,7 +2140,7 @@ async def delete_suppression(
     expected_version: int = Query(ge=1),
     session: AsyncSession = Depends(get_session),
     request: Request = None,
-) -> SuppressionModel:
+) -> Suppression:
     _require_business_writes()
     row = await session.scalar(
         select(SuppressionModel)
@@ -1969,7 +2155,7 @@ async def delete_suppression(
         kind="suppression.delete", idempotency_key=idempotency_key, payload=payload,
         result_version=row.resource_version + 1,
     ):
-        return row
+        return _suppression_response(row)
     if row.resource_version != expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
     row.active = False
@@ -1980,7 +2166,7 @@ async def delete_suppression(
     )
     await session.commit()
     await session.refresh(row)
-    return row
+    return _suppression_response(row)
 
 
 def _webhook_secret(provider: str) -> bytes:
