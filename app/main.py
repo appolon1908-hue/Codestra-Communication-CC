@@ -49,8 +49,26 @@ SERVICE = "codestra-communication"
 
 @app.middleware("http")
 async def operational_headers(request: Request, call_next):
-    correlation_id = request.headers.get("X-Correlation-ID") or str(uuid4())
+    supplied_correlation = request.headers.get("X-Correlation-ID")
+    correlation_id = supplied_correlation or str(uuid4())
     request.state.correlation_id = correlation_id
+    if supplied_correlation is not None and not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", supplied_correlation
+    ):
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "correlation_id_invalid", "correlation_id": str(uuid4())},
+            headers={"Cache-Control": "no-store"},
+        )
+    mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
+    read_only_post = request.url.path.endswith("/render")
+    governed_path = request.url.path.startswith("/v1/communications/") or request.url.path.startswith("/v1/webhooks/")
+    if mutation and governed_path and not read_only_post and supplied_correlation is None:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "correlation_id_required", "correlation_id": correlation_id},
+            headers={"Cache-Control": "no-store", "X-Correlation-ID": correlation_id},
+        )
     started = time.perf_counter()
     try:
         response = await call_next(request)

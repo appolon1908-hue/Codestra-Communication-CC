@@ -44,7 +44,7 @@ async def test_message_routes_require_bearer_before_business_gate():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/v1/communications/messages",
-            headers={"X-Tenant-ID": "tenant-a", "Idempotency-Key": "message-key-1"},
+            headers={"X-Tenant-ID": "tenant-a", "Idempotency-Key": "message-key-1", "X-Correlation-ID": "auth-test"},
             json={"channel": "email", "recipient": "nobody@example.invalid", "template_key": "test"},
         )
     assert response.status_code == 401
@@ -61,6 +61,7 @@ async def test_tenant_claim_mismatch_is_denied(monkeypatch: pytest.MonkeyPatch):
                 "Authorization": "Bearer synthetic",
                 "X-Tenant-ID": "tenant-a",
                 "Idempotency-Key": "message-key-1",
+                "X-Correlation-ID": "auth-test",
             },
             json={"channel": "email", "recipient": "nobody@example.invalid", "template_key": "test"},
         )
@@ -78,6 +79,7 @@ async def test_missing_scope_is_denied(monkeypatch: pytest.MonkeyPatch):
                 "Authorization": "Bearer synthetic",
                 "X-Tenant-ID": "tenant-a",
                 "Idempotency-Key": "message-key-1",
+                "X-Correlation-ID": "auth-test",
             },
             json={"channel": "email", "recipient": "nobody@example.invalid", "template_key": "test"},
         )
@@ -95,6 +97,7 @@ async def test_authorized_mutation_reaches_fail_closed_business_gate(monkeypatch
                 "Authorization": "Bearer synthetic",
                 "X-Tenant-ID": "tenant-a",
                 "Idempotency-Key": "message-key-1",
+                "X-Correlation-ID": "auth-test",
             },
             json={"channel": "email", "recipient": "nobody@example.invalid", "template_key": "test"},
         )

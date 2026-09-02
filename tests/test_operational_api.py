@@ -38,3 +38,15 @@ async def test_operational_headers_and_content_type():
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-correlation-id"] == "contract-id"
     assert response.headers["content-type"].startswith("application/json")
+
+
+@pytest.mark.asyncio
+async def test_mutations_require_a_bounded_correlation_identity_before_auth():
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        missing = await client.post("/v1/communications/preferences", json={})
+        invalid = await client.get("/health", headers={"X-Correlation-ID": "bad correlation value"})
+    assert missing.status_code == 400
+    assert missing.json()["detail"] == "correlation_id_required"
+    assert missing.headers["x-correlation-id"]
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"] == "correlation_id_invalid"
