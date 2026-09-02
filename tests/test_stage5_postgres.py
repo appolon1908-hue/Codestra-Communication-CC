@@ -161,7 +161,7 @@ async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts
 
     class Client:
         async def dispatch(self, payload):
-            return MiddlewareResult(str(payload["operation_id"]), "accepted")
+            return MiddlewareResult("middleware-delivery-operation", "accepted")
 
     assert await run_delivery_once(Client(), lease_seconds=30, max_attempts=3, session_factory=sessions)
     async with sessions() as session:
@@ -177,6 +177,50 @@ async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts
                 CommunicationOperationModel.state == "accepted"
             )
         ) == 1
+        current_version = message.resource_version
+    async with sessions() as session:
+        pending = await cancel_message(
+            message_id,
+            CancelMessage(expected_version=current_version, reason="synthetic cancellation"),
+            tenant_id,
+            f"cancel-{uuid.uuid4()}",
+            session,
+        )
+        assert pending.status == "cancellation_pending"
+        cancel_operation = await session.scalar(
+            select(CommunicationOperationModel).where(
+                CommunicationOperationModel.message_id == message_id,
+                CommunicationOperationModel.kind == "cancel",
+            )
+        )
+        cancel_outbox = await session.scalar(
+            select(DeliveryOutboxModel).where(
+                DeliveryOutboxModel.operation_id == cancel_operation.id
+            )
+        )
+        assert json.loads(cancel_outbox.payload_json)["delivery_operation_id"] == (
+            "middleware-delivery-operation"
+        )
+
+    class CancelClient:
+        async def dispatch(self, _payload):
+            return MiddlewareResult("middleware-cancel-operation", "cancelled")
+
+    assert await run_delivery_once(
+        CancelClient(), lease_seconds=30, max_attempts=3, session_factory=sessions
+    )
+    async with sessions() as session:
+        message = await session.get(MessageModel, message_id)
+        assert message.status == "cancelled"
+        event_types = set(
+            await session.scalars(
+                select(MessageEventModel.event_type).where(
+                    MessageEventModel.message_id == message_id
+                )
+            )
+        )
+        assert "communication.message.cancellation_requested" in event_types
+        assert "communication.message.cancelled" in event_types
     await engine.dispose()
 
 
@@ -397,10 +441,16 @@ async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe
         template_version = template.resource_version
     async with sessions() as session:
         updated = await update_template(
-            template_id, TemplateUpdate(expected_version=template_version, body_template="Hello"),
+            template_id,
+            TemplateUpdate(
+                expected_version=template_version,
+                subject_template=None,
+                body_template="Hello",
+            ),
             tenant_id, "template-update-key", session,
         )
         assert updated.resource_version == template_version + 1
+        assert updated.subject_template is None
         assert [row.id for row in await list_templates(tenant_id, session)] == [template_id]
         with pytest.raises(HTTPException) as hidden:
             await get_template(template_id, other_tenant, session)
@@ -474,4 +524,60 @@ async def test_concurrent_policy_inserts_return_the_committed_winner(monkeypatch
 
     suppressions = await asyncio.gather(suppression_attempt(), suppression_attempt())
     assert suppressions[0].id == suppressions[1].id
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_message_acceptance_rechecks_concurrent_consent_revocation(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-consent-race-{uuid.uuid4()}"
+    recipient = f"consent-race-{uuid.uuid4()}@example.invalid"
+    async with sessions() as seed:
+        seed.add(
+            ConsentModel(
+                tenant_id=tenant_id,
+                subject_key=recipient,
+                channel="email",
+                status="granted",
+                source="synthetic-race",
+            )
+        )
+        await seed.commit()
+
+    revoker = sessions()
+    consent = await revoker.scalar(
+        select(ConsentModel)
+        .where(
+            ConsentModel.tenant_id == tenant_id,
+            ConsentModel.subject_key == recipient,
+            ConsentModel.channel == "email",
+        )
+        .with_for_update()
+    )
+    consent.status = "revoked"
+
+    async def accept_message():
+        async with sessions() as sender:
+            return await create_message(
+                MessageCreate(
+                    channel=Channel.EMAIL,
+                    recipient=recipient,
+                    template_key="marketing.test",
+                    purpose=Purpose.MARKETING,
+                ),
+                tenant_id,
+                f"message-{uuid.uuid4()}",
+                sender,
+            )
+
+    pending = asyncio.create_task(accept_message())
+    await asyncio.sleep(0.05)
+    assert not pending.done()
+    await revoker.commit()
+    await revoker.close()
+    with pytest.raises(HTTPException) as denied:
+        await pending
+    assert denied.value.detail == "marketing_consent_missing"
     await engine.dispose()

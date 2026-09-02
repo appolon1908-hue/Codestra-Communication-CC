@@ -462,7 +462,7 @@ async def create_message(
                 ConsentModel.subject_key == recipient,
                 ConsentModel.channel == body.channel.value,
                 ConsentModel.status == "granted",
-            )
+            ).with_for_update()
         )
         if consent.scalar_one_or_none() is None:
             raise HTTPException(status_code=409, detail="marketing_consent_missing")
@@ -645,11 +645,40 @@ async def cancel_message(
         return row
     if row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
-    if row.status not in {"accepted_delivery_disabled", "queued"}:
+    if row.status not in {"accepted_delivery_disabled", "queued", "middleware_accepted"}:
         raise HTTPException(status_code=409, detail="message_not_cancellable")
     previous = row.status
     delivery_operation_id = row.operation_id
-    row.status = "cancellation_pending" if previous == "queued" and delivery_operation_id else "cancelled"
+    delivery_operation = None
+    delivery_outbox = None
+    if delivery_operation_id is not None:
+        delivery_operation = await session.scalar(
+            select(CommunicationOperationModel)
+            .where(
+                CommunicationOperationModel.id == delivery_operation_id,
+                CommunicationOperationModel.tenant_id == x_tenant_id,
+                CommunicationOperationModel.kind == "deliver",
+            )
+            .with_for_update()
+        )
+        delivery_outbox = await session.scalar(
+            select(DeliveryOutboxModel)
+            .where(DeliveryOutboxModel.operation_id == delivery_operation_id)
+            .with_for_update()
+        )
+    middleware_operation_id = (
+        delivery_operation.middleware_operation_id if delivery_operation is not None else None
+    )
+    if delivery_outbox is not None and delivery_outbox.state == "pending":
+        delivery_outbox.state = "cancelled"
+        delivery_operation.state = "cancelled_before_dispatch"
+        row.status = "cancelled"
+    elif middleware_operation_id:
+        row.status = "cancellation_pending"
+    elif delivery_operation_id is not None:
+        row.status = "reconciliation_required"
+    else:
+        row.status = "cancelled"
     row.cancelled_at = datetime.now(timezone.utc) if row.status == "cancelled" else None
     row.resource_version += 1
     session.add(
@@ -662,7 +691,7 @@ async def cancel_message(
             result_version=row.resource_version,
         )
     )
-    if row.status == "cancellation_pending":
+    if row.status == "cancellation_pending" and middleware_operation_id is not None:
         cancel_operation = CommunicationOperationModel(
             tenant_id=x_tenant_id,
             message_id=message_id,
@@ -681,7 +710,7 @@ async def cancel_message(
                 payload_json=json.dumps(
                     {
                         "operation_id": str(cancel_operation.id),
-                        "delivery_operation_id": str(delivery_operation_id),
+                        "delivery_operation_id": middleware_operation_id,
                         "message_id": str(message_id),
                         "action": "cancel",
                         "reason": body.reason,
@@ -696,7 +725,11 @@ async def cancel_message(
     await _message_event(
         session,
         row,
-        event_type="communication.message.cancelled",
+        event_type=(
+            "communication.message.cancelled"
+            if row.status == "cancelled"
+            else "communication.message.cancellation_requested"
+        ),
         previous_status=previous,
         request=request,
         safe_detail=body.reason,
@@ -828,9 +861,11 @@ async def update_template(
         return row
     if row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
-    for field in ("subject_template", "body_template", "active"):
+    if "subject_template" in body.model_fields_set:
+        row.subject_template = body.subject_template
+    for field in ("body_template", "active"):
         value = getattr(body, field)
-        if value is not None:
+        if field in body.model_fields_set and value is not None:
             setattr(row, field, value)
     row.resource_version += 1
     _audit_domain(

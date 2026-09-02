@@ -106,10 +106,16 @@ async def complete(
         elif operation.kind == "cancel":
             message.status = "reconciliation_required"
         message.resource_version += 1
+        if operation.kind == "cancel" and message.status == "cancelled":
+            event_type = "communication.message.cancelled"
+        elif operation.kind == "cancel":
+            event_type = "communication.message.cancellation_reconciliation_required"
+        else:
+            event_type = "communication.message.deliver.middleware_accepted"
         session.add(
             MessageEventModel(
                 tenant_id=message.tenant_id, message_id=message.id,
-                event_type=f"communication.message.{operation.kind}.middleware_accepted",
+                event_type=event_type,
                 previous_status=previous, new_status=message.status,
                 actor_id="communication-delivery-worker",
                 correlation_id=operation.correlation_id,
