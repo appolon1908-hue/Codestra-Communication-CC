@@ -22,10 +22,12 @@ from .auth import require_scope
 from .models import (
     CommunicationAuditModel,
     ConsentModel,
+    DomainMutationModel,
     MessageEventModel,
     MessageModel,
     MessageMutationModel,
     SuppressionModel,
+    TemplateModel,
 )
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
@@ -102,6 +104,66 @@ class CancelMessage(BaseModel):
     reason: str = Field(min_length=1, max_length=240)
 
 
+class TemplateCreate(BaseModel):
+    key: str = Field(min_length=1, max_length=160, pattern=r"^[a-z0-9][a-z0-9_.-]*$")
+    channel: Channel
+    locale: str = Field(default="en", min_length=2, max_length=24, pattern=r"^[A-Za-z0-9_-]+$")
+    subject_template: str | None = Field(default=None, max_length=2000)
+    body_template: str = Field(min_length=1, max_length=100_000)
+
+
+class TemplateUpdate(BaseModel):
+    expected_version: int = Field(ge=1)
+    subject_template: str | None = Field(default=None, max_length=2000)
+    body_template: str | None = Field(default=None, min_length=1, max_length=100_000)
+    active: bool | None = None
+
+
+class Template(BaseModel):
+    id: UUID
+    key: str
+    channel: Channel
+    locale: str
+    subject_template: str | None
+    body_template: str
+    active: bool
+    resource_version: int
+    model_config = {"from_attributes": True}
+
+
+class ConsentChange(BaseModel):
+    subject_key: str = Field(min_length=1, max_length=256)
+    channel: Channel
+    source: str = Field(min_length=1, max_length=128)
+    evidence: str | None = Field(default=None, max_length=4000)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class Consent(BaseModel):
+    subject_key: str
+    channel: Channel
+    status: str
+    source: str
+    resource_version: int
+    model_config = {"from_attributes": True}
+
+
+class SuppressionCreate(BaseModel):
+    recipient: str = Field(min_length=1, max_length=512)
+    channel: Channel
+    reason: str = Field(min_length=1, max_length=128)
+
+
+class Suppression(BaseModel):
+    id: UUID
+    channel: Channel
+    recipient: str
+    reason: str
+    active: bool
+    resource_version: int
+    model_config = {"from_attributes": True}
+
+
 def _actor(request: Request | None) -> str:
     principal = getattr(getattr(request, "state", None), "principal", None)
     return getattr(principal, "subject", "codestra-communication-internal")[:160]
@@ -139,6 +201,75 @@ async def _message_event(
             aggregate_id=row.id,
             action=event_type,
             outcome="accepted",
+            actor_id=_actor(request),
+            correlation_id=_correlation(request),
+        )
+    )
+
+
+def _domain_fingerprint(kind: str, aggregate_key: str, payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {"kind": kind, "aggregate_key": aggregate_key, "payload": payload},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+async def _record_domain_mutation(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    aggregate_type: str,
+    aggregate_key: str,
+    kind: str,
+    idempotency_key: str,
+    payload: dict[str, Any],
+    result_version: int,
+) -> bool:
+    fingerprint = _domain_fingerprint(kind, aggregate_key, payload)
+    prior = await session.scalar(
+        select(DomainMutationModel).where(
+            DomainMutationModel.tenant_id == tenant_id,
+            DomainMutationModel.mutation_type == kind,
+            DomainMutationModel.idempotency_key == idempotency_key,
+        )
+    )
+    if prior is not None:
+        if prior.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        return False
+    session.add(
+        DomainMutationModel(
+            tenant_id=tenant_id,
+            aggregate_type=aggregate_type,
+            aggregate_key=aggregate_key,
+            mutation_type=kind,
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            result_version=result_version,
+        )
+    )
+    return True
+
+
+def _audit_domain(
+    session: AsyncSession,
+    *,
+    tenant_id: str,
+    aggregate_type: str,
+    aggregate_id: UUID,
+    action: str,
+    request: Request | None,
+) -> None:
+    session.add(
+        CommunicationAuditModel(
+            tenant_id=tenant_id,
+            aggregate_type=aggregate_type,
+            aggregate_id=aggregate_id,
+            action=action,
+            outcome="completed",
             actor_id=_actor(request),
             correlation_id=_correlation(request),
         )
@@ -262,6 +393,7 @@ async def create_message(
             SuppressionModel.tenant_id == tenant_id,
             SuppressionModel.channel == body.channel.value,
             SuppressionModel.recipient == recipient,
+            SuppressionModel.active.is_(True),
         )
     )
     if suppressed.scalar_one_or_none() is not None:
@@ -449,6 +581,369 @@ async def cancel_message(
         previous_status=previous,
         request=request,
         safe_detail=body.reason,
+    )
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+@router.post(
+    "/templates",
+    response_model=Template,
+    status_code=201,
+    dependencies=[Depends(require_scope("communications.templates.write"))],
+)
+async def create_template(
+    body: TemplateCreate,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> TemplateModel:
+    payload = body.model_dump(mode="json")
+    fingerprint = _domain_fingerprint("template.create", f"{body.key}:{body.locale}", payload)
+    prior = await session.scalar(
+        select(TemplateModel).where(
+            TemplateModel.tenant_id == x_tenant_id,
+            TemplateModel.idempotency_key == idempotency_key,
+        )
+    )
+    if prior is not None:
+        if prior.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        return prior
+    row = TemplateModel(
+        tenant_id=x_tenant_id,
+        key=body.key,
+        channel=body.channel.value,
+        locale=body.locale,
+        subject_template=body.subject_template,
+        body_template=body.body_template,
+        idempotency_key=idempotency_key,
+        request_fingerprint=fingerprint,
+    )
+    session.add(row)
+    try:
+        await session.flush()
+        _audit_domain(
+            session, tenant_id=x_tenant_id, aggregate_type="template", aggregate_id=row.id,
+            action="communication.template.created", request=request,
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        replay = await session.scalar(
+            select(TemplateModel).where(
+                TemplateModel.tenant_id == x_tenant_id,
+                TemplateModel.idempotency_key == idempotency_key,
+            )
+        )
+        if replay is None or replay.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="template_key_conflict") from exc
+        return replay
+    await session.refresh(row)
+    return row
+
+
+@router.get(
+    "/templates",
+    response_model=list[Template],
+    dependencies=[Depends(require_scope("communications.templates.read"))],
+)
+async def list_templates(
+    x_tenant_id: TenantHeader,
+    session: AsyncSession = Depends(get_session),
+) -> list[TemplateModel]:
+    rows = await session.scalars(
+        select(TemplateModel).where(TemplateModel.tenant_id == x_tenant_id).order_by(TemplateModel.key)
+    )
+    return list(rows.all())
+
+
+@router.get(
+    "/templates/{template_id}",
+    response_model=Template,
+    dependencies=[Depends(require_scope("communications.templates.read"))],
+)
+async def get_template(
+    template_id: UUID,
+    x_tenant_id: TenantHeader,
+    session: AsyncSession = Depends(get_session),
+) -> TemplateModel:
+    row = await session.scalar(
+        select(TemplateModel).where(TemplateModel.id == template_id, TemplateModel.tenant_id == x_tenant_id)
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="template_not_found")
+    return row
+
+
+@router.patch(
+    "/templates/{template_id}",
+    response_model=Template,
+    dependencies=[Depends(require_scope("communications.templates.write"))],
+)
+async def update_template(
+    template_id: UUID,
+    body: TemplateUpdate,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> TemplateModel:
+    row = await session.scalar(
+        select(TemplateModel)
+        .where(TemplateModel.id == template_id, TemplateModel.tenant_id == x_tenant_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="template_not_found")
+    payload = body.model_dump(mode="json")
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="template", aggregate_key=str(template_id),
+        kind="template.update", idempotency_key=idempotency_key, payload=payload,
+        result_version=row.resource_version + 1,
+    ):
+        return row
+    if row.resource_version != body.expected_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
+    for field in ("subject_template", "body_template", "active"):
+        value = getattr(body, field)
+        if value is not None:
+            setattr(row, field, value)
+    row.resource_version += 1
+    _audit_domain(
+        session, tenant_id=x_tenant_id, aggregate_type="template", aggregate_id=row.id,
+        action="communication.template.updated", request=request,
+    )
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+@router.post(
+    "/consents",
+    response_model=Consent,
+    dependencies=[Depends(require_scope("communications.consent.write"))],
+)
+async def grant_consent(
+    body: ConsentChange,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> ConsentModel:
+    subject = _recipient(body.subject_key, body.channel)
+    row = await session.scalar(
+        select(ConsentModel)
+        .where(
+            ConsentModel.tenant_id == x_tenant_id,
+            ConsentModel.subject_key == subject,
+            ConsentModel.channel == body.channel.value,
+        )
+        .with_for_update()
+    )
+    version = 1 if row is None else row.resource_version + 1
+    payload = body.model_dump(mode="json")
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="consent",
+        aggregate_key=f"{body.channel.value}:{subject}", kind="consent.grant",
+        idempotency_key=idempotency_key, payload=payload, result_version=version,
+    ):
+        assert row is not None
+        return row
+    if row is None:
+        row = ConsentModel(
+            tenant_id=x_tenant_id, subject_key=subject, channel=body.channel.value,
+            status="granted", source=body.source, evidence=body.evidence,
+            idempotency_key=idempotency_key,
+            request_fingerprint=_domain_fingerprint("consent.grant", subject, payload),
+            resource_version=1,
+        )
+        session.add(row)
+    else:
+        if body.expected_version is None or row.resource_version != body.expected_version:
+            raise HTTPException(status_code=409, detail="stale_resource_version")
+        row.status = "granted"
+        row.source = body.source
+        row.evidence = body.evidence
+        row.resource_version += 1
+    await session.flush()
+    _audit_domain(
+        session, tenant_id=x_tenant_id, aggregate_type="consent", aggregate_id=row.id,
+        action="communication.consent.granted", request=request,
+    )
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+@router.get(
+    "/consents",
+    response_model=list[Consent],
+    dependencies=[Depends(require_scope("communications.consent.read"))],
+)
+async def list_consents(
+    x_tenant_id: TenantHeader,
+    status_filter: str | None = Query(default=None, alias="status", max_length=24),
+    session: AsyncSession = Depends(get_session),
+) -> list[ConsentModel]:
+    statement = select(ConsentModel).where(ConsentModel.tenant_id == x_tenant_id)
+    if status_filter:
+        statement = statement.where(ConsentModel.status == status_filter)
+    rows = await session.scalars(statement.order_by(ConsentModel.updated_at.desc()).limit(100))
+    return list(rows.all())
+
+
+@router.post(
+    "/consents/revoke",
+    response_model=Consent,
+    dependencies=[Depends(require_scope("communications.consent.write"))],
+)
+async def revoke_consent(
+    body: ConsentChange,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> ConsentModel:
+    subject = _recipient(body.subject_key, body.channel)
+    row = await session.scalar(
+        select(ConsentModel)
+        .where(
+            ConsentModel.tenant_id == x_tenant_id,
+            ConsentModel.subject_key == subject,
+            ConsentModel.channel == body.channel.value,
+        )
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="consent_not_found")
+    payload = body.model_dump(mode="json")
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="consent",
+        aggregate_key=f"{body.channel.value}:{subject}", kind="consent.revoke",
+        idempotency_key=idempotency_key, payload=payload, result_version=row.resource_version + 1,
+    ):
+        return row
+    if body.expected_version is None or row.resource_version != body.expected_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
+    row.status = "revoked"
+    row.source = body.source
+    row.evidence = body.evidence
+    row.resource_version += 1
+    _audit_domain(
+        session, tenant_id=x_tenant_id, aggregate_type="consent", aggregate_id=row.id,
+        action="communication.consent.revoked", request=request,
+    )
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+@router.post(
+    "/suppressions",
+    response_model=Suppression,
+    dependencies=[Depends(require_scope("communications.suppression.write"))],
+)
+async def create_suppression(
+    body: SuppressionCreate,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> SuppressionModel:
+    recipient = _recipient(body.recipient, body.channel)
+    row = await session.scalar(
+        select(SuppressionModel)
+        .where(
+            SuppressionModel.tenant_id == x_tenant_id,
+            SuppressionModel.channel == body.channel.value,
+            SuppressionModel.recipient == recipient,
+        )
+        .with_for_update()
+    )
+    payload = body.model_dump(mode="json")
+    version = 1 if row is None else row.resource_version + 1
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="suppression",
+        aggregate_key=f"{body.channel.value}:{recipient}", kind="suppression.create",
+        idempotency_key=idempotency_key, payload=payload, result_version=version,
+    ):
+        assert row is not None
+        return row
+    if row is None:
+        row = SuppressionModel(
+            tenant_id=x_tenant_id, channel=body.channel.value, recipient=recipient,
+            reason=body.reason, active=True, idempotency_key=idempotency_key,
+            request_fingerprint=_domain_fingerprint("suppression.create", recipient, payload),
+        )
+        session.add(row)
+    else:
+        row.active = True
+        row.reason = body.reason
+        row.resource_version += 1
+    await session.flush()
+    _audit_domain(
+        session, tenant_id=x_tenant_id, aggregate_type="suppression", aggregate_id=row.id,
+        action="communication.suppression.created", request=request,
+    )
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+@router.get(
+    "/suppressions",
+    response_model=list[Suppression],
+    dependencies=[Depends(require_scope("communications.suppression.read"))],
+)
+async def list_suppressions(
+    x_tenant_id: TenantHeader,
+    session: AsyncSession = Depends(get_session),
+) -> list[SuppressionModel]:
+    rows = await session.scalars(
+        select(SuppressionModel).where(
+            SuppressionModel.tenant_id == x_tenant_id, SuppressionModel.active.is_(True)
+        ).order_by(SuppressionModel.created_at.desc()).limit(100)
+    )
+    return list(rows.all())
+
+
+@router.delete(
+    "/suppressions/{suppression_id}",
+    response_model=Suppression,
+    dependencies=[Depends(require_scope("communications.suppression.write"))],
+)
+async def delete_suppression(
+    suppression_id: UUID,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    expected_version: int = Query(ge=1),
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> SuppressionModel:
+    row = await session.scalar(
+        select(SuppressionModel)
+        .where(SuppressionModel.id == suppression_id, SuppressionModel.tenant_id == x_tenant_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="suppression_not_found")
+    payload = {"expected_version": expected_version}
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="suppression", aggregate_key=str(suppression_id),
+        kind="suppression.delete", idempotency_key=idempotency_key, payload=payload,
+        result_version=row.resource_version + 1,
+    ):
+        return row
+    if row.resource_version != expected_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
+    row.active = False
+    row.resource_version += 1
+    _audit_domain(
+        session, tenant_id=x_tenant_id, aggregate_type="suppression", aggregate_id=row.id,
+        action="communication.suppression.deleted", request=request,
     )
     await session.commit()
     await session.refresh(row)

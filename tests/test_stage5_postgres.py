@@ -12,11 +12,25 @@ from app.main import (
     Channel,
     MessageCreate,
     Purpose,
+    ConsentChange,
+    SuppressionCreate,
+    TemplateCreate,
+    TemplateUpdate,
     cancel_message,
     create_message,
     get_message,
     get_message_events,
     list_messages,
+    create_suppression,
+    create_template,
+    delete_suppression,
+    get_template,
+    grant_consent,
+    list_consents,
+    list_suppressions,
+    list_templates,
+    revoke_consent,
+    update_template,
 )
 from app.models import (
     CommunicationAuditModel,
@@ -24,6 +38,7 @@ from app.models import (
     MessageEventModel,
     MessageMutationModel,
     SuppressionModel,
+    TemplateModel,
 )
 from sqlalchemy import func, select
 
@@ -150,4 +165,67 @@ async def test_message_history_cancel_and_mutation_ledger_are_durable(monkeypatc
                 CommunicationAuditModel.aggregate_id == message_id,
             )
         ) == 2
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe():
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-policy-{uuid.uuid4()}"
+    other_tenant = f"tenant-policy-other-{uuid.uuid4()}"
+    async with sessions() as session:
+        template = await create_template(
+            TemplateCreate(
+                key="welcome.transactional", channel=Channel.EMAIL, locale="en",
+                subject_template="Welcome", body_template="Hello {{name}}",
+            ),
+            tenant_id, f"template-{uuid.uuid4()}", session,
+        )
+        template_id = template.id
+        template_version = template.resource_version
+    async with sessions() as session:
+        updated = await update_template(
+            template_id, TemplateUpdate(expected_version=template_version, body_template="Hello"),
+            tenant_id, "template-update-key", session,
+        )
+        assert updated.resource_version == template_version + 1
+        assert [row.id for row in await list_templates(tenant_id, session)] == [template_id]
+        with pytest.raises(HTTPException) as hidden:
+            await get_template(template_id, other_tenant, session)
+        assert hidden.value.status_code == 404
+
+    recipient = f"policy-{uuid.uuid4()}@example.invalid"
+    grant = ConsentChange(
+        subject_key=recipient, channel=Channel.EMAIL, source="synthetic-test"
+    )
+    async with sessions() as session:
+        consent = await grant_consent(grant, tenant_id, "consent-grant-key", session)
+        consent_version = consent.resource_version
+    async with sessions() as session:
+        replay = await grant_consent(grant, tenant_id, "consent-grant-key", session)
+        assert replay.resource_version == consent_version
+        revoked = await revoke_consent(
+            grant.model_copy(update={"expected_version": consent_version}),
+            tenant_id, "consent-revoke-key", session,
+        )
+        assert revoked.status == "revoked"
+        assert len(await list_consents(tenant_id, None, session)) == 1
+
+    async with sessions() as session:
+        suppression = await create_suppression(
+            SuppressionCreate(recipient=recipient, channel=Channel.EMAIL, reason="synthetic"),
+            tenant_id, "suppression-create-key", session,
+        )
+        suppression_id = suppression.id
+        suppression_version = suppression.resource_version
+    async with sessions() as session:
+        deleted = await delete_suppression(
+            suppression_id, tenant_id, "suppression-delete-key", suppression_version, session,
+        )
+        assert deleted.active is False
+        assert await list_suppressions(tenant_id, session) == []
+    async with sessions() as session:
+        assert await session.scalar(select(func.count()).select_from(TemplateModel)) == 1
+        assert await session.scalar(select(func.count()).select_from(CommunicationAuditModel)) >= 5
     await engine.dispose()
