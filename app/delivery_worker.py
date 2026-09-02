@@ -105,11 +105,56 @@ async def complete(
             message.cancelled_at = datetime.now(UTC)
         elif operation.kind == "cancel":
             message.status = "reconciliation_required"
-        message.resource_version += 1
+        elif operation.kind == "reconcile":
+            try:
+                target_id = UUID(str(claim.payload["target_operation_id"]))
+            except (KeyError, TypeError, ValueError):
+                operation.state = "failed"
+                operation.error_code = "reconciliation_payload_invalid"
+                message.status = "reconciliation_required"
+            else:
+                target = await session.scalar(
+                    select(CommunicationOperationModel)
+                    .where(
+                        CommunicationOperationModel.id == target_id,
+                        CommunicationOperationModel.tenant_id == operation.tenant_id,
+                        CommunicationOperationModel.message_id == message.id,
+                    )
+                    .with_for_update()
+                )
+                state = result.state.lower()
+                target_kind = str(claim.payload.get("target_kind", ""))
+                if target is None or target.kind != target_kind:
+                    operation.state = "failed"
+                    operation.error_code = "reconciliation_target_invalid"
+                    message.status = "reconciliation_required"
+                elif target_kind == "cancel" and state in {"cancelled", "canceled"}:
+                    target.state = "accepted"
+                    operation.state = "accepted"
+                    message.status = "cancelled"
+                    message.cancelled_at = datetime.now(UTC)
+                elif target_kind == "deliver" and state in {
+                    "accepted", "completed", "succeeded", "sent", "delivered"
+                }:
+                    target.state = "accepted"
+                    operation.state = "accepted"
+                    message.status = "middleware_accepted" if state == "accepted" else state
+                elif state in {"failed", "rejected", "dead_letter"}:
+                    target.state = "failed"
+                    operation.state = "accepted"
+                    message.status = "delivery_failed"
+                else:
+                    target.state = "reconciliation_required"
+                    operation.state = "reconciliation_required"
+                    message.status = "reconciliation_required"
+        if message.status != previous:
+            message.resource_version += 1
         if operation.kind == "cancel" and message.status == "cancelled":
             event_type = "communication.message.cancelled"
         elif operation.kind == "cancel":
             event_type = "communication.message.cancellation_reconciliation_required"
+        elif operation.kind == "reconcile":
+            event_type = f"communication.message.reconciliation_{message.status}"
         else:
             event_type = "communication.message.deliver.middleware_accepted"
         session.add(

@@ -54,13 +54,18 @@ class MiddlewareCommunicationClient:
 
     async def dispatch(self, payload: dict[str, Any]) -> MiddlewareResult:
         action = str(payload.get("action", "deliver"))
-        if action == "cancel":
+        if action == "reconcile":
+            path = f"/api/v1/operations/{quote(str(payload['middleware_operation_id']), safe='')}"
+            method = "GET"
+        elif action == "cancel":
             path = f"/api/v1/operations/{quote(str(payload['delivery_operation_id']), safe='')}/cancel"
+            method = "POST"
         else:
             channel = str(payload.get("channel", ""))
             if channel not in {"email", "sms"}:
                 raise MiddlewareDeliveryError("middleware_channel_not_supported", retryable=False)
             path = f"/api/v1/control/communications/{channel}"
+            method = "POST"
         headers = {
             "Authorization": f"Bearer {self._token()}",
             "X-Tenant-ID": str(payload["tenant_id"]),
@@ -69,7 +74,12 @@ class MiddlewareCommunicationClient:
         }
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(f"{self._origin()}{path}", headers=headers, json=payload)
+                response = await client.request(
+                    method,
+                    f"{self._origin()}{path}",
+                    headers=headers,
+                    json=payload if method == "POST" else None,
+                )
         except httpx.TransportError as exc:
             raise MiddlewareDeliveryError(
                 "middleware_outcome_unknown", retryable=True, outcome_unknown=True

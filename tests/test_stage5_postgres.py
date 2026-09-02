@@ -18,6 +18,7 @@ from app.main import (
     Channel,
     MessageCreate,
     Purpose,
+    ReconcileOperation,
     ConsentChange,
     SuppressionCreate,
     TemplateCreate,
@@ -38,6 +39,7 @@ from app.main import (
     list_suppressions,
     list_templates,
     revoke_consent,
+    reconcile_operation,
     update_template,
     app,
     metrics,
@@ -281,6 +283,73 @@ async def test_unknown_delivery_outcome_stops_redispatch_and_updates_public_stat
             )
         ) == 1
     assert not await run_delivery_once(Client(), lease_seconds=30, max_attempts=8, session_factory=sessions)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_is_durable_and_reads_middleware_status(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    monkeypatch.setenv("EXTERNAL_DELIVERY_ENABLED", "true")
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-reconcile-{uuid.uuid4()}"
+    message_id = uuid.uuid4()
+    target_id = uuid.uuid4()
+    async with sessions() as session:
+        session.add(
+            MessageModel(
+                id=message_id,
+                tenant_id=tenant_id,
+                channel="email",
+                recipient="reconcile@example.invalid",
+                template_key="transactional.test",
+                purpose="transactional",
+                idempotency_key=f"message-{uuid.uuid4()}",
+                request_fingerprint="0" * 64,
+                status="reconciliation_required",
+                resource_version=2,
+                operation_id=target_id,
+            )
+        )
+        await session.flush()
+        session.add(
+            CommunicationOperationModel(
+                id=target_id,
+                tenant_id=tenant_id,
+                message_id=message_id,
+                kind="deliver",
+                state="reconciliation_required",
+                idempotency_key=f"delivery-{uuid.uuid4()}",
+                correlation_id=f"corr-{uuid.uuid4()}",
+                middleware_operation_id="middleware-operation-reconcile",
+            )
+        )
+        await session.commit()
+    async with sessions() as session:
+        operation = await reconcile_operation(
+            target_id,
+            ReconcileOperation(expected_message_version=2),
+            tenant_id,
+            "reconcile-idempotency-key",
+            session,
+        )
+        reconciliation_id = operation.id
+        assert operation.state == "pending"
+
+    class Client:
+        async def dispatch(self, payload):
+            assert payload["action"] == "reconcile"
+            assert payload["middleware_operation_id"] == "middleware-operation-reconcile"
+            return MiddlewareResult("middleware-operation-reconcile", "completed")
+
+    assert await run_delivery_once(Client(), lease_seconds=30, max_attempts=3, session_factory=sessions)
+    async with sessions() as session:
+        message = await session.get(MessageModel, message_id)
+        target = await session.get(CommunicationOperationModel, target_id)
+        reconciliation = await session.get(CommunicationOperationModel, reconciliation_id)
+        assert message.status == "completed"
+        assert target.state == "accepted"
+        assert reconciliation.state == "accepted"
     await engine.dispose()
 
 

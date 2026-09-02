@@ -209,6 +209,10 @@ class Operation(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ReconcileOperation(BaseModel):
+    expected_message_version: int = Field(ge=1)
+
+
 def _require_business_writes() -> None:
     if not BUSINESS_WRITES_ENABLED:
         raise HTTPException(status_code=423, detail="business_writes_disabled")
@@ -662,6 +666,115 @@ async def get_operation(
     if row is None:
         raise HTTPException(status_code=404, detail="operation_not_found")
     return row
+
+
+@router.post(
+    "/operations/{operation_id}/reconcile",
+    response_model=Operation,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(require_scope("communications.operations.reconcile"))],
+)
+async def reconcile_operation(
+    operation_id: UUID,
+    body: ReconcileOperation,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> CommunicationOperationModel:
+    _require_business_writes()
+    target = await session.scalar(
+        select(CommunicationOperationModel)
+        .where(
+            CommunicationOperationModel.id == operation_id,
+            CommunicationOperationModel.tenant_id == x_tenant_id,
+        )
+        .with_for_update()
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="operation_not_found")
+    message = await session.scalar(
+        select(MessageModel)
+        .where(
+            MessageModel.id == target.message_id,
+            MessageModel.tenant_id == x_tenant_id,
+        )
+        .with_for_update()
+    )
+    if message is None:
+        raise HTTPException(status_code=404, detail="message_not_found")
+    payload = {
+        "target_operation_id": str(target.id),
+        "expected_message_version": body.expected_message_version,
+    }
+    aggregate_key = str(target.id)
+    if not await _record_domain_mutation(
+        session,
+        tenant_id=x_tenant_id,
+        aggregate_type="operation",
+        aggregate_key=aggregate_key,
+        kind="operation.reconcile",
+        idempotency_key=idempotency_key,
+        payload=payload,
+        result_version=message.resource_version,
+    ):
+        replay = await session.scalar(
+            select(CommunicationOperationModel).where(
+                CommunicationOperationModel.tenant_id == x_tenant_id,
+                CommunicationOperationModel.idempotency_key == idempotency_key,
+                CommunicationOperationModel.kind == "reconcile",
+            )
+        )
+        if replay is None:
+            raise HTTPException(status_code=409, detail="reconciliation_replay_missing")
+        return replay
+    if message.resource_version != body.expected_message_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
+    if target.state != "reconciliation_required":
+        raise HTTPException(status_code=409, detail="operation_not_reconcilable")
+    if not target.middleware_operation_id:
+        raise HTTPException(status_code=409, detail="middleware_operation_identity_unknown")
+    operation = CommunicationOperationModel(
+        tenant_id=x_tenant_id,
+        message_id=message.id,
+        kind="reconcile",
+        state="pending",
+        idempotency_key=idempotency_key,
+        correlation_id=_correlation(request),
+    )
+    session.add(operation)
+    await session.flush()
+    session.add(
+        DeliveryOutboxModel(
+            tenant_id=x_tenant_id,
+            operation_id=operation.id,
+            payload_json=json.dumps(
+                {
+                    "action": "reconcile",
+                    "operation_id": str(operation.id),
+                    "target_operation_id": str(target.id),
+                    "target_kind": target.kind,
+                    "middleware_operation_id": target.middleware_operation_id,
+                    "message_id": str(message.id),
+                    "tenant_id": x_tenant_id,
+                    "correlation_id": operation.correlation_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+    )
+    _audit_domain(
+        session,
+        tenant_id=x_tenant_id,
+        aggregate_type="operation",
+        aggregate_id=target.id,
+        action="communication.operation.reconciliation_requested",
+        request=request,
+    )
+    await session.commit()
+    await session.refresh(operation)
+    return operation
 
 
 @router.post(
