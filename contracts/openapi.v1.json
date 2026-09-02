@@ -1480,6 +1480,19 @@
     "/v1/communications/capabilities": {
       "get": {
         "operationId": "capabilities_v1_communications_capabilities_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1492,6 +1505,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "Capabilities"
@@ -1526,6 +1549,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -1587,6 +1621,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -1656,6 +1701,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -1745,6 +1801,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -1800,6 +1867,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -1868,6 +1946,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -1947,6 +2036,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2006,6 +2106,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -2076,6 +2187,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2143,6 +2265,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -2242,6 +2375,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2323,6 +2467,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2383,6 +2538,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -2452,6 +2618,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -2559,6 +2736,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2614,6 +2802,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -2683,6 +2882,17 @@
               "title": "Idempotency-Key",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -2731,6 +2941,17 @@
       "get": {
         "operationId": "provider_health_v1_communications_provider_health_get",
         "parameters": [
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "X-Tenant-ID",
@@ -2784,6 +3005,17 @@
       "get": {
         "operationId": "provider_statuses_v1_communications_providers_get",
         "parameters": [
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "X-Tenant-ID",
@@ -2858,6 +3090,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -2937,6 +3180,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -2992,6 +3246,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3062,6 +3327,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3129,6 +3405,17 @@
               "title": "Idempotency-Key",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -3185,6 +3472,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3246,6 +3544,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3337,6 +3646,17 @@
               "title": "Idempotency-Key",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3383,6 +3703,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3444,6 +3775,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3514,6 +3856,17 @@
               "title": "X-Tenant-Id",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -3579,6 +3932,17 @@
               "maxLength": 200,
               "minLength": 8,
               "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3647,6 +4011,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3741,6 +4116,17 @@
               "maxLength": 128,
               "minLength": 1,
               "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Correlation-Id",
               "type": "string"
             }
           }
@@ -3840,7 +4226,7 @@
             "required": true,
             "schema": {
               "maxLength": 128,
-              "minLength": 8,
+              "minLength": 1,
               "title": "X-Correlation-Id",
               "type": "string"
             }

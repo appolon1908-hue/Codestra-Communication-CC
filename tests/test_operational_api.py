@@ -50,3 +50,5 @@ async def test_mutations_require_a_bounded_correlation_identity_before_auth():
     assert missing.headers["x-correlation-id"]
     assert invalid.status_code == 400
     assert invalid.json()["detail"] == "correlation_id_invalid"
+    assert invalid.headers["x-correlation-id"] == invalid.json()["correlation_id"]
+    assert invalid.headers["cache-control"] == "no-store"

@@ -43,7 +43,6 @@ from .events import record_message_event
 from .metrics import DELIVERY_OUTBOX, HTTP_DURATION, HTTP_REQUESTS, OPERATIONS, PROVIDER_INBOX, render
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
-router = APIRouter(prefix="/v1/communications")
 EXTERNAL_DELIVERY_ENABLED = os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").lower() == "true"
 BUSINESS_WRITES_ENABLED = os.getenv("BUSINESS_WRITES_ENABLED", "false").lower() == "true"
 SERVICE = "codestra-communication"
@@ -51,44 +50,49 @@ SERVICE = "codestra-communication"
 
 @app.middleware("http")
 async def operational_headers(request: Request, call_next):
+    started = time.perf_counter()
     supplied_correlation = request.headers.get("X-Correlation-ID")
     correlation_id = supplied_correlation or str(uuid4())
     request.state.correlation_id = correlation_id
+    def finalize(response: Response) -> Response:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Correlation-ID"] = correlation_id
+        method = request.method if request.method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "OTHER"
+        HTTP_REQUESTS.labels(method=method, status_class=f"{response.status_code // 100}xx").inc()
+        HTTP_DURATION.labels(method=method).observe(time.perf_counter() - started)
+        return response
     if supplied_correlation is not None and not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", supplied_correlation
     ):
-        return JSONResponse(
+        correlation_id = str(uuid4())
+        return finalize(JSONResponse(
             status_code=400,
-            content={"detail": "correlation_id_invalid", "correlation_id": str(uuid4())},
-            headers={"Cache-Control": "no-store"},
-        )
+            content={"detail": "correlation_id_invalid", "correlation_id": correlation_id},
+        ))
     mutation = request.method in {"POST", "PUT", "PATCH", "DELETE"}
     read_only_post = request.url.path.endswith("/render")
     governed_path = request.url.path.startswith("/v1/communications/") or request.url.path.startswith("/v1/webhooks/")
     if mutation and governed_path and not read_only_post and supplied_correlation is None:
-        return JSONResponse(
+        return finalize(JSONResponse(
             status_code=400,
             content={"detail": "correlation_id_required", "correlation_id": correlation_id},
-            headers={"Cache-Control": "no-store", "X-Correlation-ID": correlation_id},
-        )
-    started = time.perf_counter()
+        ))
     try:
         response = await call_next(request)
     except Exception:
         response = JSONResponse(status_code=500, content={"detail": "internal_error", "correlation_id": correlation_id})
-    response.headers["Cache-Control"] = "no-store"
-    response.headers["X-Correlation-ID"] = correlation_id
-    HTTP_REQUESTS.labels(
-        method=request.method if request.method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "OTHER",
-        status_class=f"{response.status_code // 100}xx",
-    ).inc()
-    HTTP_DURATION.labels(
-        method=request.method if request.method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "OTHER"
-    ).observe(time.perf_counter() - started)
-    return response
+    return finalize(response)
 
 TenantHeader = Annotated[str, Header(alias="X-Tenant-ID", min_length=1, max_length=128)]
 IdempotencyHeader = Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=200)]
+CorrelationHeader = Annotated[str, Header(alias="X-Correlation-ID", min_length=1, max_length=128)]
+
+
+def require_correlation(x_correlation_id: CorrelationHeader) -> str:
+    return x_correlation_id
+
+
+router = APIRouter(prefix="/v1/communications", dependencies=[Depends(require_correlation)])
 
 
 class Channel(StrEnum):
@@ -2002,7 +2006,10 @@ async def communication_usage(
     return UsageReport(from_at=from_at, to=to, totals=totals)
 
 
-@app.post("/v1/webhooks/communications/{provider}/results", status_code=202)
+@app.post(
+    "/v1/webhooks/communications/{provider}/results", status_code=202,
+    dependencies=[Depends(require_correlation)],
+)
 async def provider_result(
     provider: str,
     request: Request,
