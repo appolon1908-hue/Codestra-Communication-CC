@@ -1,6 +1,16 @@
 from app.main import EXTERNAL_DELIVERY_ENABLED, app, capabilities
 
 
+def test_committed_openapi_matches_runtime():
+    import json
+    from pathlib import Path
+
+    committed = json.loads(
+        (Path(__file__).parents[1] / "contracts/openapi.v1.json").read_text()
+    )
+    assert committed == app.openapi()
+
+
 def test_canonical_communications_route_is_plural_and_stable():
     paths = set(app.openapi()["paths"])
     assert "/v1/communications/messages" in paths

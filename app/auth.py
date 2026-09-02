@@ -6,11 +6,33 @@ from functools import lru_cache
 from typing import Annotated, Any, Callable
 
 import jwt
-from fastapi import Depends, Header, HTTPException, Request
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Header, HTTPException, Request, Security
+from fastapi.openapi.models import OAuthFlowClientCredentials, OAuthFlows
+from fastapi.security import OAuth2
 
 
-bearer = HTTPBearer(auto_error=False)
+service_bearer = OAuth2(
+    flows=OAuthFlows(
+        clientCredentials=OAuthFlowClientCredentials(
+            tokenUrl=f"{os.getenv('KEYCLOAK_ISSUER', 'https://auth.codestra.co/realms/codestra').rstrip('/')}/protocol/openid-connect/token",
+            scopes={
+                "communications.send": "Submit governed communication messages",
+                "communications.read": "Read communication messages and history",
+                "communications.cancel": "Cancel governed communication messages",
+                "communications.templates.read": "Read communication templates",
+                "communications.templates.write": "Manage communication templates",
+                "communications.consent.read": "Read communication consent state",
+                "communications.consent.write": "Manage communication consent state",
+                "communications.suppression.read": "Read suppression state",
+                "communications.suppression.write": "Manage suppression state",
+                "communications.providers.read": "Read provider routing and health state",
+                "metrics.read": "Read private service metrics",
+            },
+        )
+    ),
+    scheme_name="serviceBearer",
+    auto_error=False,
+)
 
 
 @dataclass(frozen=True)
@@ -45,9 +67,9 @@ def _scope_set(claims: dict[str, Any]) -> frozenset[str]:
 async def authenticate(
     request: Request,
     x_tenant_id: Annotated[str | None, Header(alias="X-Tenant-ID")] = None,
-    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)] = None,
+    token: Annotated[str | None, Security(service_bearer)] = None,
 ) -> Principal:
-    if credentials is None or credentials.scheme.lower() != "bearer":
+    if token is None:
         raise HTTPException(
             status_code=401,
             detail="bearer_token_required",
@@ -59,9 +81,9 @@ async def authenticate(
         "KEYCLOAK_JWKS_URL", f"{issuer}/protocol/openid-connect/certs"
     ).strip()
     try:
-        key = _jwk_client(jwks_url).get_signing_key_from_jwt(credentials.credentials)
+        key = _jwk_client(jwks_url).get_signing_key_from_jwt(token)
         claims = jwt.decode(
-            credentials.credentials,
+            token,
             key.key,
             algorithms=["RS256", "PS256", "ES256"],
             audience=audience,
@@ -93,7 +115,7 @@ async def authenticate(
 
 
 def require_scope(scope: str) -> Callable[..., Principal]:
-    async def dependency(principal: Annotated[Principal, Depends(authenticate)]) -> Principal:
+    async def dependency(principal: Principal = Security(authenticate, scopes=[scope])) -> Principal:
         if scope not in principal.scopes:
             raise HTTPException(status_code=403, detail="required_scope_missing")
         return principal

@@ -22,6 +22,7 @@ jobs:
       - run: pip install -e '.[test]'
       - run: python -m compileall -q app scripts tests
       - run: pytest -q -m 'not postgres'
+      - run: python scripts/validate_openapi_parity.py
       - run: python -c "from app.main import app, EXTERNAL_DELIVERY_ENABLED; assert app; assert EXTERNAL_DELIVERY_ENABLED is False"
 
   postgres-certification:

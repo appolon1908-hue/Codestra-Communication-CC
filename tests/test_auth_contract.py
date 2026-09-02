@@ -104,5 +104,6 @@ async def test_authorized_mutation_reaches_fail_closed_business_gate(monkeypatch
 
 def test_openapi_declares_scoped_bearer_security():
     operation = app.openapi()["paths"]["/v1/communications/messages"]["post"]
-    assert operation["security"]
-    assert "HTTPBearer" in operation["security"][0]
+    assert operation["security"] == [{"serviceBearer": ["communications.send"]}]
+    scheme = app.openapi()["components"]["securitySchemes"]["serviceBearer"]
+    assert scheme["flows"]["clientCredentials"]["scopes"]["communications.send"]
