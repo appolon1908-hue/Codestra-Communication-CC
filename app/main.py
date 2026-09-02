@@ -4,11 +4,14 @@ import hashlib
 import json
 import os
 import re
+import asyncio
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +23,17 @@ from .models import ConsentModel, MessageModel, SuppressionModel
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
 router = APIRouter(prefix="/v1/communications")
 EXTERNAL_DELIVERY_ENABLED = os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").lower() == "true"
+SERVICE = "codestra-communication"
+
+
+@app.middleware("http")
+async def operational_headers(request: Request, call_next):
+    correlation_id = request.headers.get("X-Correlation-ID") or str(uuid4())
+    request.state.correlation_id = correlation_id
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Correlation-ID"] = correlation_id
+    return response
 
 TenantHeader = Annotated[str, Header(alias="X-Tenant-ID", min_length=1, max_length=128)]
 IdempotencyHeader = Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=200)]
@@ -87,13 +101,42 @@ def _fingerprint(tenant_id: str, body: MessageCreate, recipient: str) -> str:
 
 
 @app.get("/health")
-def health() -> dict[str, object]:
-    return {"status": "ok", "external_delivery_enabled": EXTERNAL_DELIVERY_ENABLED}
+def health(request: Request = None) -> dict[str, object]:
+    correlation_id = getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))
+    return {"status": "ok", "service": SERVICE, "timestamp": datetime.now(timezone.utc).isoformat(), "correlation_id": correlation_id}
 
 
+@app.get("/ready")
+async def ready(request: Request, session: AsyncSession = Depends(get_session)):
+    try:
+        await asyncio.wait_for(session.execute(select(1)), timeout=2.0)
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "service": SERVICE, "dependencies": {"database": "unavailable"}, "correlation_id": request.state.correlation_id})
+    return {"status": "ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready"}, "correlation_id": request.state.correlation_id}
+
+
+@app.get("/version")
+def version(request: Request = None) -> dict[str, object]:
+    correlation_id = getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))
+    return {"service": SERVICE, "application_version": app.version, "api_versions": ["v1"], "git_sha": os.getenv("CODESTRA_GIT_SHA", "unknown"), "image_digest": os.getenv("CODESTRA_IMAGE_DIGEST", "unknown"), "build_timestamp": os.getenv("CODESTRA_BUILD_TIMESTAMP", "unknown"), "migration_revision": os.getenv("CODESTRA_MIGRATION_REVISION", "unknown"), "environment": os.getenv("CODESTRA_ENVIRONMENT", "unknown"), "correlation_id": correlation_id}
+
+
+@app.get("/capabilities")
 @router.get("/capabilities")
-def capabilities() -> dict[str, object]:
+def capabilities(request: Request = None) -> dict[str, object]:
+    correlation_id = getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))
     return {
+        "service": SERVICE,
+        "maintenance_mode": os.getenv("MAINTENANCE_MODE", "false").lower() == "true",
+        "degraded_mode": False,
+        "business_writes_enabled": False,
+        "external_delivery_enabled": EXTERNAL_DELIVERY_ENABLED,
+        "live_email_enabled": False,
+        "live_sms_enabled": False,
+        "live_pstn_enabled": False,
+        "read_only_mode": not EXTERNAL_DELIVERY_ENABLED,
+        "simulation_enabled": not EXTERNAL_DELIVERY_ENABLED,
+        "supported_api_versions": ["v1"],
         "email": True,
         "sms": True,
         "whatsapp": True,
@@ -101,6 +144,7 @@ def capabilities() -> dict[str, object]:
         "consent_enforcement": True,
         "suppression_enforcement": True,
         "external_delivery": EXTERNAL_DELIVERY_ENABLED,
+        "correlation_id": correlation_id,
     }
 
 
