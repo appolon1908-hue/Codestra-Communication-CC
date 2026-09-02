@@ -10,7 +10,7 @@ from enum import StrEnum
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -19,7 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .db import get_session
 from .auth import require_scope
-from .models import ConsentModel, MessageModel, SuppressionModel
+from .models import (
+    CommunicationAuditModel,
+    ConsentModel,
+    MessageEventModel,
+    MessageModel,
+    MessageMutationModel,
+    SuppressionModel,
+)
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
 router = APIRouter(prefix="/v1/communications")
@@ -73,7 +80,69 @@ class Message(BaseModel):
     channel: Channel
     template_key: str
     purpose: Purpose
+    resource_version: int
+    created_at: datetime
     model_config = {"from_attributes": True}
+
+
+class MessageEvent(BaseModel):
+    id: int
+    event_type: str
+    previous_status: str | None
+    new_status: str
+    actor_id: str
+    correlation_id: str
+    safe_detail: str | None
+    occurred_at: datetime
+    model_config = {"from_attributes": True}
+
+
+class CancelMessage(BaseModel):
+    expected_version: int = Field(ge=1)
+    reason: str = Field(min_length=1, max_length=240)
+
+
+def _actor(request: Request | None) -> str:
+    principal = getattr(getattr(request, "state", None), "principal", None)
+    return getattr(principal, "subject", "codestra-communication-internal")[:160]
+
+
+def _correlation(request: Request | None) -> str:
+    return getattr(getattr(request, "state", None), "correlation_id", str(uuid4()))[:128]
+
+
+async def _message_event(
+    session: AsyncSession,
+    row: MessageModel,
+    *,
+    event_type: str,
+    previous_status: str | None,
+    request: Request | None,
+    safe_detail: str | None = None,
+) -> None:
+    session.add(
+        MessageEventModel(
+            tenant_id=row.tenant_id,
+            message_id=row.id,
+            event_type=event_type,
+            previous_status=previous_status,
+            new_status=row.status,
+            actor_id=_actor(request),
+            correlation_id=_correlation(request),
+            safe_detail=safe_detail,
+        )
+    )
+    session.add(
+        CommunicationAuditModel(
+            tenant_id=row.tenant_id,
+            aggregate_type="message",
+            aggregate_id=row.id,
+            action=event_type,
+            outcome="accepted",
+            actor_id=_actor(request),
+            correlation_id=_correlation(request),
+        )
+    )
 
 
 def _tenant(header_tenant: str, body_tenant: str | None) -> str:
@@ -164,6 +233,7 @@ async def create_message(
     x_tenant_id: TenantHeader,
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
+    request: Request = None,
 ) -> MessageModel:
     if not BUSINESS_WRITES_ENABLED:
         raise HTTPException(status_code=423, detail="business_writes_disabled")
@@ -221,6 +291,15 @@ async def create_message(
     )
     session.add(row)
     try:
+        await session.flush()
+        await _message_event(
+            session,
+            row,
+            event_type="communication.message.accepted",
+            previous_status=None,
+            request=request,
+            safe_detail="external_delivery_disabled" if not EXTERNAL_DELIVERY_ENABLED else "queued",
+        )
         await session.commit()
     except IntegrityError:
         await session.rollback()
@@ -242,6 +321,24 @@ async def create_message(
 
 
 @router.get(
+    "/messages",
+    response_model=list[Message],
+    dependencies=[Depends(require_scope("communications.read"))],
+)
+async def list_messages(
+    x_tenant_id: TenantHeader,
+    status_filter: str | None = Query(default=None, alias="status", max_length=48),
+    limit: int = Query(default=50, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> list[MessageModel]:
+    statement = select(MessageModel).where(MessageModel.tenant_id == x_tenant_id)
+    if status_filter:
+        statement = statement.where(MessageModel.status == status_filter)
+    rows = await session.scalars(statement.order_by(MessageModel.created_at.desc()).limit(limit))
+    return list(rows.all())
+
+
+@router.get(
     "/messages/{message_id}",
     response_model=Message,
     dependencies=[Depends(require_scope("communications.read"))],
@@ -260,6 +357,101 @@ async def get_message(
     row = result.scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="message_not_found")
+    return row
+
+
+@router.get(
+    "/messages/{message_id}/events",
+    response_model=list[MessageEvent],
+    dependencies=[Depends(require_scope("communications.read"))],
+)
+async def get_message_events(
+    message_id: UUID,
+    x_tenant_id: TenantHeader,
+    after: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> list[MessageEventModel]:
+    exists = await session.scalar(
+        select(MessageModel.id).where(
+            MessageModel.id == message_id, MessageModel.tenant_id == x_tenant_id
+        )
+    )
+    if exists is None:
+        raise HTTPException(status_code=404, detail="message_not_found")
+    statement = select(MessageEventModel).where(
+        MessageEventModel.tenant_id == x_tenant_id,
+        MessageEventModel.message_id == message_id,
+    )
+    if after is not None:
+        statement = statement.where(MessageEventModel.id > after)
+    rows = await session.scalars(statement.order_by(MessageEventModel.id).limit(limit))
+    return list(rows.all())
+
+
+@router.post(
+    "/messages/{message_id}/cancel",
+    response_model=Message,
+    dependencies=[Depends(require_scope("communications.cancel"))],
+)
+async def cancel_message(
+    message_id: UUID,
+    body: CancelMessage,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> MessageModel:
+    row = await session.scalar(
+        select(MessageModel)
+        .where(MessageModel.id == message_id, MessageModel.tenant_id == x_tenant_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="message_not_found")
+    fingerprint = hashlib.sha256(
+        json.dumps(body.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    prior = await session.scalar(
+        select(MessageMutationModel).where(
+            MessageMutationModel.tenant_id == x_tenant_id,
+            MessageMutationModel.message_id == message_id,
+            MessageMutationModel.mutation_type == "cancel",
+            MessageMutationModel.idempotency_key == idempotency_key,
+        )
+    )
+    if prior is not None:
+        if prior.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        return row
+    if row.resource_version != body.expected_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
+    if row.status not in {"accepted_delivery_disabled", "queued"}:
+        raise HTTPException(status_code=409, detail="message_not_cancellable")
+    previous = row.status
+    row.status = "cancelled"
+    row.cancelled_at = datetime.now(timezone.utc)
+    row.resource_version += 1
+    session.add(
+        MessageMutationModel(
+            tenant_id=x_tenant_id,
+            message_id=message_id,
+            mutation_type="cancel",
+            idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+            result_version=row.resource_version,
+        )
+    )
+    await _message_event(
+        session,
+        row,
+        event_type="communication.message.cancelled",
+        previous_status=previous,
+        request=request,
+        safe_detail=body.reason,
+    )
+    await session.commit()
+    await session.refresh(row)
     return row
 
 
