@@ -16,7 +16,7 @@ DO $$ DECLARE unsafe boolean; BEGIN
     IF unsafe THEN RAISE EXCEPTION 'plaintext restoration is required before schema rollback'; END IF;
   END IF;
   IF to_regclass('public.communication_templates') IS NOT NULL THEN
-    EXECUTE 'SELECT EXISTS (SELECT 1 FROM communication_templates WHERE body_template IS NULL)' INTO unsafe;
+    EXECUTE 'SELECT EXISTS (SELECT 1 FROM communication_templates WHERE body_template IS NULL OR (subject_ciphertext IS NOT NULL AND subject_template IS NULL))' INTO unsafe;
     IF unsafe THEN RAISE EXCEPTION 'plaintext restoration is required before schema rollback'; END IF;
   END IF;
 END $$;

@@ -36,9 +36,15 @@ def _root() -> Path:
     if not configured:
         raise DataProtectionError("data_key_directory_missing")
     root = Path(configured)
-    if not root.is_absolute() or root.is_symlink() or not root.is_dir():
+    if (
+        not root.is_absolute() or root.is_symlink() or not root.is_dir()
+        or root.resolve() != root
+    ):
         raise DataProtectionError("data_key_directory_invalid")
-    return root.resolve()
+    details = root.stat()
+    if details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077:
+        raise DataProtectionError("data_key_directory_permissions_invalid")
+    return root
 
 
 def _active_key_id() -> str:
@@ -59,15 +65,33 @@ def _key(key_id: str) -> bytes:
     if not _KEY_ID.fullmatch(key_id):
         raise DataProtectionError("data_key_id_invalid")
     root = _root()
-    path = root / f"{key_id}.key"
-    if path.is_symlink() or path.parent.resolve() != root or not path.is_file():
-        raise DataProtectionError("data_key_file_invalid")
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode & 0o077:
-        raise DataProtectionError("data_key_permissions_invalid")
-    raw = path.read_bytes().strip()
+    directory_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        try:
+            fd = os.open(
+                f"{key_id}.key", os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+        except OSError as exc:
+            raise DataProtectionError("data_key_file_invalid") from exc
+        try:
+            details = os.fstat(fd)
+            if not stat.S_ISREG(details.st_mode) or details.st_uid != os.geteuid():
+                raise DataProtectionError("data_key_file_invalid")
+            if stat.S_IMODE(details.st_mode) & 0o077:
+                raise DataProtectionError("data_key_permissions_invalid")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(4097)
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
     if len(raw) != 32:
-        raw = _b64decode(raw.decode("ascii", "strict"))
+        try:
+            encoded = raw.decode("ascii", "strict").strip()
+        except UnicodeDecodeError as exc:
+            raise DataProtectionError("data_key_length_invalid") from exc
+        raw = _b64decode(encoded)
     if len(raw) != 32:
         raise DataProtectionError("data_key_length_invalid")
     return raw

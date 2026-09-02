@@ -54,3 +54,16 @@ def test_key_source_fails_closed_for_missing_symlink_or_broad_permissions(keys, 
     os.symlink(keys / "key-2.key", keys / "key-1.key")
     with pytest.raises(DataProtectionError, match="data_key_file_invalid"):
         protect("value", tenant_id="tenant-a", purpose="recipient")
+
+
+def test_raw_binary_key_preserves_leading_and_trailing_whitespace(keys, monkeypatch):
+    (keys / "whitespace.key").write_bytes(b"\x20" + b"x" * 30 + b"\x0a")
+    (keys / "whitespace.key").chmod(0o600)
+    monkeypatch.setenv("COMMUNICATION_ACTIVE_DATA_KEY_ID", "whitespace")
+    envelope = protect("value", tenant_id="tenant-a", purpose="recipient")
+    assert unprotect(envelope, tenant_id="tenant-a", purpose="recipient") == "value"
+
+
+def test_key_directory_must_be_private_and_owned(keys):
+    keys.chmod(0o750)
+    assert readiness() == (False, "data_key_directory_permissions_invalid")
