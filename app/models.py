@@ -21,6 +21,7 @@ class MessageModel(Base):
     request_fingerprint: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(48), index=True)
     provider_message_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    operation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     resource_version: Mapped[int] = mapped_column(Integer, default=1)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -168,4 +169,78 @@ class DomainMutationModel(Base):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "mutation_type", "idempotency_key", name="uq_communication_domain_mutation"),
+    )
+
+
+class CommunicationOperationModel(Base):
+    __tablename__ = "communication_operations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(48), nullable=False, default="deliver")
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    middleware_operation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "message_id"], ["messages.tenant_id", "messages.id"],
+            ondelete="CASCADE", name="fk_communication_operation_message",
+        ),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_communication_operation_idempotency"),
+        UniqueConstraint("tenant_id", "id", name="uq_communication_operation_tenant_id"),
+    )
+
+
+class DeliveryOutboxModel(Base):
+    __tablename__ = "communication_delivery_outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    operation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, unique=True, index=True)
+    payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "operation_id"],
+            ["communication_operations.tenant_id", "communication_operations.id"],
+            ondelete="CASCADE", name="fk_communication_outbox_operation",
+        ),
+    )
+
+
+class ProviderInboxModel(Base):
+    __tablename__ = "communication_provider_inbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_event_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    message_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="processed")
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "message_id"], ["messages.tenant_id", "messages.id"],
+            ondelete="CASCADE", name="fk_communication_provider_inbox_message",
+        ),
+        UniqueConstraint(
+            "tenant_id", "provider", "provider_event_id", name="uq_communication_provider_event"
+        ),
     )

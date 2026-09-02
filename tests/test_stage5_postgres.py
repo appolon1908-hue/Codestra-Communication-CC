@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import os
 import uuid
+import hashlib
+import hmac
+import json
+import time
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -31,15 +36,22 @@ from app.main import (
     list_templates,
     revoke_consent,
     update_template,
+    app,
 )
 from app.models import (
     CommunicationAuditModel,
+    CommunicationOperationModel,
     ConsentModel,
     MessageEventModel,
     MessageMutationModel,
+    MessageModel,
+    DeliveryOutboxModel,
+    ProviderInboxModel,
     SuppressionModel,
     TemplateModel,
 )
+from app.delivery_worker import run_once as run_delivery_once
+from app.middleware_client import MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
@@ -111,6 +123,98 @@ async def test_consent_suppression_idempotency_and_tenant_isolation(monkeypatch)
             await create_message(body, tenant_a, f"suppressed-{uuid.uuid4()}", session)
         assert suppressed.value.detail == "recipient_suppressed"
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_enabled_delivery_creates_one_middleware_outbox_and_worker_accepts(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    monkeypatch.setattr("app.main.EXTERNAL_DELIVERY_ENABLED", True)
+    monkeypatch.setenv("EXTERNAL_DELIVERY_ENABLED", "true")
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-delivery-{uuid.uuid4()}"
+    async with sessions() as session:
+        message = await create_message(
+            MessageCreate(
+                channel=Channel.EMAIL, recipient=f"delivery-{uuid.uuid4()}@example.invalid",
+                template_key="transactional.test", purpose=Purpose.TRANSACTIONAL,
+            ),
+            tenant_id, f"message-{uuid.uuid4()}", session,
+        )
+        message_id = message.id
+        assert message.status == "queued" and message.operation_id is not None
+
+    class Client:
+        async def dispatch(self, payload):
+            return MiddlewareResult(str(payload["operation_id"]), "accepted")
+
+    assert await run_delivery_once(Client(), lease_seconds=30, max_attempts=3, session_factory=sessions)
+    async with sessions() as session:
+        message = await session.get(MessageModel, message_id)
+        assert message.status == "middleware_accepted"
+        assert await session.scalar(
+            select(func.count()).select_from(DeliveryOutboxModel).where(
+                DeliveryOutboxModel.state == "completed"
+            )
+        ) == 1
+        assert await session.scalar(
+            select(func.count()).select_from(CommunicationOperationModel).where(
+                CommunicationOperationModel.state == "accepted"
+            )
+        ) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_provider_webhook_is_signed_replay_safe_and_tenant_bound(monkeypatch, tmp_path):
+    secret = b"synthetic-webhook-secret-material-32bytes"
+    secret_dir = tmp_path / "webhooks"
+    secret_dir.mkdir()
+    (secret_dir / "synthetic.secret").write_bytes(secret)
+    monkeypatch.setenv("PROVIDER_WEBHOOK_SECRET_DIR", str(secret_dir))
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant_id = f"tenant-webhook-{uuid.uuid4()}"
+    message_id = uuid.uuid4()
+    async with sessions() as session:
+        session.add(
+            MessageModel(
+                id=message_id, tenant_id=tenant_id, channel="email",
+                recipient="webhook@example.invalid", template_key="transactional.test",
+                purpose="transactional", idempotency_key=f"message-{uuid.uuid4()}",
+                request_fingerprint="0" * 64, status="middleware_accepted",
+                provider_message_id="provider-message-1",
+            )
+        )
+        await session.commit()
+    body = json.dumps(
+        {
+            "message_id": str(message_id), "event_type": "delivered",
+            "provider_message_id": "provider-message-1",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    timestamp = str(int(time.time()))
+    signature = hmac.new(secret, timestamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    headers = {
+        "X-Tenant-ID": tenant_id,
+        "X-Correlation-ID": f"corr-{uuid.uuid4()}",
+        "X-Provider-Timestamp": timestamp,
+        "X-Provider-Event-ID": "provider-event-1",
+        "X-Provider-Signature": f"sha256={signature}",
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        first = await client.post("/v1/webhooks/communications/synthetic/results", headers=headers, content=body)
+        replay = await client.post("/v1/webhooks/communications/synthetic/results", headers=headers, content=body)
+    assert first.status_code == 202 and first.json()["status"] == "processed"
+    assert replay.status_code == 202 and replay.json()["status"] == "already_processed"
+    async with sessions() as session:
+        message = await session.get(MessageModel, message_id)
+        assert message.status == "delivered"
+        assert await session.scalar(select(func.count()).select_from(ProviderInboxModel)) == 1
     await engine.dispose()
 
 

@@ -1,0 +1,171 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from uuid import UUID
+
+from sqlalchemy import and_, or_, select
+
+from .db import SessionLocal
+from .middleware_client import MiddlewareCommunicationClient, MiddlewareDeliveryError, MiddlewareResult
+from .models import CommunicationOperationModel, DeliveryOutboxModel, MessageEventModel, MessageModel
+
+
+UTC = timezone.utc
+
+
+@dataclass(frozen=True)
+class Claim:
+    outbox_id: UUID
+    operation_id: UUID
+    attempts: int
+    payload: dict[str, object]
+
+
+def capability_enabled() -> bool:
+    return os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").strip().lower() == "true"
+
+
+async def claim_one(lease_seconds: int, *, session_factory=SessionLocal) -> Claim | None:
+    if not capability_enabled():
+        return None
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(DeliveryOutboxModel)
+            .where(
+                or_(
+                    and_(DeliveryOutboxModel.state == "pending", DeliveryOutboxModel.available_at <= now),
+                    and_(DeliveryOutboxModel.state == "processing", DeliveryOutboxModel.lease_until < now),
+                )
+            )
+            .order_by(DeliveryOutboxModel.created_at)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if row is None:
+            return None
+        row.state = "processing"
+        row.attempts += 1
+        row.lease_until = now + timedelta(seconds=lease_seconds)
+        operation = await session.get(CommunicationOperationModel, row.operation_id, with_for_update=True)
+        if operation is None:
+            row.state = "dead_letter"
+            row.last_error_code = "operation_missing"
+            await session.commit()
+            return None
+        operation.attempts = row.attempts
+        await session.commit()
+        return Claim(row.id, row.operation_id, row.attempts, json.loads(row.payload_json))
+
+
+async def complete(
+    claim: Claim, result: MiddlewareResult, *, session_factory=SessionLocal
+) -> None:
+    async with session_factory() as session:
+        outbox = await session.scalar(
+            select(DeliveryOutboxModel).where(DeliveryOutboxModel.id == claim.outbox_id).with_for_update()
+        )
+        operation = await session.scalar(
+            select(CommunicationOperationModel)
+            .where(CommunicationOperationModel.id == claim.operation_id)
+            .with_for_update()
+        )
+        if (
+            outbox is None or operation is None or outbox.state != "processing"
+            or outbox.attempts != claim.attempts
+        ):
+            return
+        message = await session.scalar(
+            select(MessageModel)
+            .where(MessageModel.id == operation.message_id, MessageModel.tenant_id == operation.tenant_id)
+            .with_for_update()
+        )
+        if message is None:
+            return
+        previous = message.status
+        operation.middleware_operation_id = result.operation_id
+        operation.state = "accepted"
+        outbox.state = "completed"
+        outbox.completed_at = datetime.now(UTC)
+        outbox.lease_until = None
+        if operation.kind == "deliver" and message.status == "queued":
+            message.status = "middleware_accepted"
+        elif operation.kind == "cancel" and result.state.lower() in {"cancelled", "canceled"}:
+            message.status = "cancelled"
+            message.cancelled_at = datetime.now(UTC)
+        elif operation.kind == "cancel":
+            message.status = "reconciliation_required"
+        message.resource_version += 1
+        session.add(
+            MessageEventModel(
+                tenant_id=message.tenant_id, message_id=message.id,
+                event_type=f"communication.message.{operation.kind}.middleware_accepted",
+                previous_status=previous, new_status=message.status,
+                actor_id="communication-delivery-worker",
+                correlation_id=operation.correlation_id,
+                safe_detail=result.state[:32],
+            )
+        )
+        await session.commit()
+
+
+async def fail(
+    claim: Claim, error: MiddlewareDeliveryError, max_attempts: int, *, session_factory=SessionLocal
+) -> None:
+    async with session_factory() as session:
+        outbox = await session.scalar(
+            select(DeliveryOutboxModel).where(DeliveryOutboxModel.id == claim.outbox_id).with_for_update()
+        )
+        operation = await session.scalar(
+            select(CommunicationOperationModel)
+            .where(CommunicationOperationModel.id == claim.operation_id)
+            .with_for_update()
+        )
+        if (
+            outbox is None or operation is None or outbox.state != "processing"
+            or outbox.attempts != claim.attempts
+        ):
+            return
+        terminal = not error.retryable or claim.attempts >= max_attempts
+        outbox.state = "dead_letter" if terminal else "pending"
+        outbox.available_at = datetime.now(UTC) + timedelta(seconds=min(2 ** min(claim.attempts, 8), 300))
+        outbox.lease_until = None
+        outbox.last_error_code = error.code[:80]
+        if terminal:
+            operation.state = "reconciliation_required" if error.outcome_unknown else "failed"
+            operation.error_code = error.code[:80]
+        await session.commit()
+
+
+async def run_once(
+    client: MiddlewareCommunicationClient, *, lease_seconds: int, max_attempts: int,
+    session_factory=SessionLocal,
+) -> bool:
+    claim = await claim_one(lease_seconds, session_factory=session_factory)
+    if claim is None:
+        return False
+    try:
+        result = await client.dispatch(claim.payload)
+    except MiddlewareDeliveryError as exc:
+        await fail(claim, exc, max_attempts, session_factory=session_factory)
+    else:
+        await complete(claim, result, session_factory=session_factory)
+    return True
+
+
+async def main() -> None:
+    client = MiddlewareCommunicationClient()
+    lease = max(5, min(int(os.getenv("DELIVERY_OUTBOX_LEASE_SECONDS", "30")), 300))
+    attempts = max(1, min(int(os.getenv("DELIVERY_OUTBOX_MAX_ATTEMPTS", "8")), 32))
+    poll = max(0.1, min(float(os.getenv("DELIVERY_OUTBOX_POLL_SECONDS", "1")), 30.0))
+    while True:
+        if not await run_once(client, lease_seconds=lease, max_attempts=attempts):
+            await asyncio.sleep(poll)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

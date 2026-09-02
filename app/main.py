@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 import re
 import asyncio
+import time
 from datetime import datetime, timezone
 from enum import StrEnum
+from pathlib import Path
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -21,11 +24,14 @@ from .db import get_session
 from .auth import require_scope
 from .models import (
     CommunicationAuditModel,
+    CommunicationOperationModel,
     ConsentModel,
     DomainMutationModel,
+    DeliveryOutboxModel,
     MessageEventModel,
     MessageModel,
     MessageMutationModel,
+    ProviderInboxModel,
     SuppressionModel,
     TemplateModel,
 )
@@ -83,6 +89,7 @@ class Message(BaseModel):
     template_key: str
     purpose: Purpose
     resource_version: int
+    operation_id: UUID | None
     created_at: datetime
     model_config = {"from_attributes": True}
 
@@ -162,6 +169,12 @@ class Suppression(BaseModel):
     active: bool
     resource_version: int
     model_config = {"from_attributes": True}
+
+
+class ProviderResult(BaseModel):
+    message_id: UUID
+    event_type: str = Field(pattern=r"^(sent|delivered|failed|bounced|complained|cancelled)$")
+    provider_message_id: str | None = Field(default=None, min_length=1, max_length=160)
 
 
 def _actor(request: Request | None) -> str:
@@ -424,6 +437,38 @@ async def create_message(
     session.add(row)
     try:
         await session.flush()
+        if EXTERNAL_DELIVERY_ENABLED:
+            operation = CommunicationOperationModel(
+                tenant_id=tenant_id,
+                message_id=row.id,
+                kind="deliver",
+                state="pending",
+                idempotency_key=idempotency_key,
+                correlation_id=_correlation(request),
+            )
+            session.add(operation)
+            await session.flush()
+            row.operation_id = operation.id
+            session.add(
+                DeliveryOutboxModel(
+                    tenant_id=tenant_id,
+                    operation_id=operation.id,
+                    payload_json=json.dumps(
+                        {
+                            "operation_id": str(operation.id),
+                            "message_id": str(row.id),
+                            "channel": row.channel,
+                            "recipient": row.recipient,
+                            "template_key": row.template_key,
+                            "purpose": row.purpose,
+                            "tenant_id": tenant_id,
+                            "correlation_id": _correlation(request),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            )
         await _message_event(
             session,
             row,
@@ -447,8 +492,6 @@ async def create_message(
         return row
     await session.refresh(row)
 
-    if EXTERNAL_DELIVERY_ENABLED:
-        raise HTTPException(status_code=501, detail="provider_delivery_not_implemented")
     return row
 
 
@@ -561,8 +604,9 @@ async def cancel_message(
     if row.status not in {"accepted_delivery_disabled", "queued"}:
         raise HTTPException(status_code=409, detail="message_not_cancellable")
     previous = row.status
-    row.status = "cancelled"
-    row.cancelled_at = datetime.now(timezone.utc)
+    delivery_operation_id = row.operation_id
+    row.status = "cancellation_pending" if previous == "queued" and delivery_operation_id else "cancelled"
+    row.cancelled_at = datetime.now(timezone.utc) if row.status == "cancelled" else None
     row.resource_version += 1
     session.add(
         MessageMutationModel(
@@ -574,6 +618,37 @@ async def cancel_message(
             result_version=row.resource_version,
         )
     )
+    if row.status == "cancellation_pending":
+        cancel_operation = CommunicationOperationModel(
+            tenant_id=x_tenant_id,
+            message_id=message_id,
+            kind="cancel",
+            state="pending",
+            idempotency_key=idempotency_key,
+            correlation_id=_correlation(request),
+        )
+        session.add(cancel_operation)
+        await session.flush()
+        row.operation_id = cancel_operation.id
+        session.add(
+            DeliveryOutboxModel(
+                tenant_id=x_tenant_id,
+                operation_id=cancel_operation.id,
+                payload_json=json.dumps(
+                    {
+                        "operation_id": str(cancel_operation.id),
+                        "delivery_operation_id": str(delivery_operation_id),
+                        "message_id": str(message_id),
+                        "action": "cancel",
+                        "reason": body.reason,
+                        "tenant_id": x_tenant_id,
+                        "correlation_id": _correlation(request),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
     await _message_event(
         session,
         row,
@@ -948,6 +1023,120 @@ async def delete_suppression(
     await session.commit()
     await session.refresh(row)
     return row
+
+
+def _webhook_secret(provider: str) -> bytes:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", provider):
+        raise HTTPException(status_code=404, detail="provider_not_found")
+    root_value = os.getenv("PROVIDER_WEBHOOK_SECRET_DIR", "").strip()
+    if not root_value:
+        raise HTTPException(status_code=503, detail="webhook_identity_unavailable")
+    root = Path(root_value).resolve()
+    path = root / f"{provider}.secret"
+    if path.is_symlink() or path.parent.resolve() != root or not path.is_file():
+        raise HTTPException(status_code=503, detail="webhook_identity_unavailable")
+    value = path.read_bytes().strip()
+    if len(value) < 32:
+        raise HTTPException(status_code=503, detail="webhook_identity_unavailable")
+    return value
+
+
+@app.post("/v1/webhooks/communications/{provider}/results", status_code=202)
+async def provider_result(
+    provider: str,
+    request: Request,
+    x_tenant_id: TenantHeader,
+    x_provider_timestamp: Annotated[str, Header(alias="X-Provider-Timestamp", min_length=1, max_length=20)],
+    x_provider_event_id: Annotated[str, Header(alias="X-Provider-Event-ID", min_length=1, max_length=160)],
+    x_provider_signature: Annotated[str, Header(alias="X-Provider-Signature", min_length=64, max_length=80)],
+    x_correlation_id: Annotated[str, Header(alias="X-Correlation-ID", min_length=8, max_length=128)],
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    body = await request.body()
+    if len(body) > 1_048_576:
+        raise HTTPException(status_code=413, detail="webhook_body_too_large")
+    try:
+        timestamp = int(x_provider_timestamp)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="webhook_timestamp_invalid") from exc
+    if abs(int(time.time()) - timestamp) > 300:
+        raise HTTPException(status_code=401, detail="webhook_timestamp_expired")
+    supplied = x_provider_signature.removeprefix("sha256=").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied):
+        raise HTTPException(status_code=401, detail="webhook_signature_invalid")
+    expected = hmac.new(
+        _webhook_secret(provider), x_provider_timestamp.encode() + b"." + body, hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="webhook_signature_invalid")
+    try:
+        event = ProviderResult.model_validate_json(body)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail="webhook_payload_invalid") from exc
+    payload_hash = hashlib.sha256(body).hexdigest()
+
+    message = await session.scalar(
+        select(MessageModel)
+        .where(MessageModel.id == event.message_id, MessageModel.tenant_id == x_tenant_id)
+        .with_for_update()
+    )
+    if message is None:
+        raise HTTPException(status_code=404, detail="message_not_found")
+    prior = await session.scalar(
+        select(ProviderInboxModel).where(
+            ProviderInboxModel.tenant_id == x_tenant_id,
+            ProviderInboxModel.provider == provider,
+            ProviderInboxModel.provider_event_id == x_provider_event_id,
+        )
+    )
+    if prior is not None:
+        if prior.payload_hash != payload_hash:
+            raise HTTPException(status_code=409, detail="webhook_replay_conflict")
+        return {"status": "already_processed", "event_id": x_provider_event_id}
+    if (
+        message.provider_message_id is not None
+        and event.provider_message_id is not None
+        and message.provider_message_id != event.provider_message_id
+    ):
+        raise HTTPException(status_code=409, detail="provider_message_mismatch")
+    previous = message.status
+    message.status = event.event_type
+    if event.provider_message_id is not None:
+        message.provider_message_id = event.provider_message_id
+    message.resource_version += 1
+    session.add(
+        ProviderInboxModel(
+            tenant_id=x_tenant_id,
+            provider=provider,
+            provider_event_id=x_provider_event_id,
+            payload_hash=payload_hash,
+            message_id=message.id,
+            event_type=event.event_type,
+        )
+    )
+    await _message_event(
+        session,
+        message,
+        event_type=f"communication.message.{event.event_type}",
+        previous_status=previous,
+        request=request,
+        safe_detail=provider,
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        replay = await session.scalar(
+            select(ProviderInboxModel).where(
+                ProviderInboxModel.tenant_id == x_tenant_id,
+                ProviderInboxModel.provider == provider,
+                ProviderInboxModel.provider_event_id == x_provider_event_id,
+            )
+        )
+        if replay is None or replay.payload_hash != payload_hash:
+            raise HTTPException(status_code=409, detail="webhook_replay_conflict") from exc
+        return {"status": "already_processed", "event_id": x_provider_event_id}
+    return {"status": "processed", "event_id": x_provider_event_id}
 
 
 app.include_router(router)
