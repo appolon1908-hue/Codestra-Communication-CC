@@ -19,6 +19,7 @@ from app.main import (
     MessageCreate,
     Purpose,
     ReconcileOperation,
+    PreferenceWrite,
     ConsentChange,
     SuppressionCreate,
     TemplateCreate,
@@ -29,6 +30,7 @@ from app.main import (
     get_message_events,
     list_messages,
     list_operations,
+    list_preferences,
     get_operation,
     create_suppression,
     create_template,
@@ -40,6 +42,7 @@ from app.main import (
     list_templates,
     revoke_consent,
     reconcile_operation,
+    upsert_preference,
     update_template,
     app,
     metrics,
@@ -54,6 +57,7 @@ from app.models import (
     MessageModel,
     DeliveryOutboxModel,
     ProviderInboxModel,
+    PreferenceModel,
     SuppressionModel,
     TemplateModel,
 )
@@ -63,6 +67,39 @@ from app.middleware_client import MiddlewareDeliveryError, MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.asyncio
+async def test_preferences_are_tenant_scoped_versioned_and_idempotent(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant = f"tenant-preference-{uuid.uuid4()}"
+    other = f"tenant-other-{uuid.uuid4()}"
+    idem = f"preference-{uuid.uuid4()}"
+    body = PreferenceWrite(subject="Person@Example.invalid", channel=Channel.EMAIL,
+                           consent="granted", source="synthetic")
+    async with sessions() as session:
+        created = await upsert_preference(body, tenant, idem, session)
+        assert created.subject == "person@example.invalid"
+        assert created.resource_version == 1
+    async with sessions() as session:
+        replay = await upsert_preference(body, tenant, idem, session)
+        assert replay.preference_id == created.preference_id
+    async with sessions() as session:
+        own = await list_preferences(tenant, "person@example.invalid", None, 50, session)
+        foreign = await list_preferences(other, None, None, 50, session)
+        assert [item.preference_id for item in own.items] == [created.preference_id]
+        assert foreign.items == []
+    async with sessions() as session:
+        updated = await upsert_preference(
+            PreferenceWrite(subject="person@example.invalid", channel=Channel.EMAIL,
+                            consent="denied", source="synthetic", expected_version=1),
+            tenant, f"preference-{uuid.uuid4()}", session,
+        )
+        assert updated.consent == "denied"
+        assert updated.resource_version == 2
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ from .models import (
     MessageModel,
     MessageMutationModel,
     ProviderInboxModel,
+    PreferenceModel,
     SuppressionModel,
     TemplateModel,
 )
@@ -164,6 +165,34 @@ class Consent(BaseModel):
     source: str
     resource_version: int
     model_config = {"from_attributes": True}
+
+
+class PreferenceWrite(BaseModel):
+    subject: str = Field(min_length=1, max_length=300)
+    channel: Channel
+    topic: str | None = Field(default=None, min_length=1, max_length=120)
+    consent: str = Field(pattern=r"^(granted|denied|unknown)$")
+    source: str = Field(default="unspecified", min_length=1, max_length=120)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    expected_version: int | None = Field(default=None, ge=1)
+    model_config = {"extra": "forbid"}
+
+
+class Preference(BaseModel):
+    preference_id: UUID
+    subject: str
+    channel: Channel
+    topic: str | None
+    consent: str
+    source: str
+    metadata: dict[str, Any]
+    resource_version: int
+    updated_at: datetime
+
+
+class PreferenceList(BaseModel):
+    items: list[Preference]
+    next_cursor: str | None = None
 
 
 class SuppressionCreate(BaseModel):
@@ -1192,6 +1221,145 @@ async def revoke_consent(
     await session.commit()
     await session.refresh(row)
     return row
+
+
+def _preference_response(row: PreferenceModel) -> Preference:
+    return Preference(
+        preference_id=row.id,
+        subject=row.subject,
+        channel=Channel(row.channel),
+        topic=row.topic or None,
+        consent=row.consent,
+        source=row.source,
+        metadata=json.loads(row.metadata_json),
+        resource_version=row.resource_version,
+        updated_at=row.updated_at,
+    )
+
+
+@router.get(
+    "/preferences",
+    response_model=PreferenceList,
+    dependencies=[Depends(require_scope("communications.preferences.read"))],
+)
+async def list_preferences(
+    x_tenant_id: TenantHeader,
+    subject: str | None = Query(default=None, min_length=1, max_length=300),
+    cursor: UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=100),
+    session: AsyncSession = Depends(get_session),
+) -> PreferenceList:
+    statement = select(PreferenceModel).where(PreferenceModel.tenant_id == x_tenant_id)
+    if subject is not None:
+        statement = statement.where(PreferenceModel.subject == subject.strip())
+    if cursor is not None:
+        statement = statement.where(PreferenceModel.id > cursor)
+    rows = list((await session.scalars(statement.order_by(PreferenceModel.id).limit(limit + 1))).all())
+    return PreferenceList(
+        items=[_preference_response(row) for row in rows[:limit]],
+        next_cursor=str(rows[limit - 1].id) if len(rows) > limit else None,
+    )
+
+
+@router.get(
+    "/recipients/{recipient_id}/preferences",
+    response_model=PreferenceList,
+    dependencies=[Depends(require_scope("communications.preferences.read"))],
+)
+async def get_recipient_preferences(
+    recipient_id: str,
+    x_tenant_id: TenantHeader,
+    session: AsyncSession = Depends(get_session),
+) -> PreferenceList:
+    if not recipient_id.strip() or len(recipient_id) > 300:
+        raise HTTPException(status_code=422, detail="recipient_invalid")
+    rows = list((await session.scalars(
+        select(PreferenceModel).where(
+            PreferenceModel.tenant_id == x_tenant_id,
+            PreferenceModel.subject == recipient_id.strip(),
+        ).order_by(PreferenceModel.id).limit(100)
+    )).all())
+    return PreferenceList(items=[_preference_response(row) for row in rows])
+
+
+@router.put(
+    "/preferences",
+    response_model=Preference,
+    dependencies=[Depends(require_scope("communications.preferences.write"))],
+)
+@router.post(
+    "/preferences",
+    response_model=Preference,
+    dependencies=[Depends(require_scope("communications.preferences.write"))],
+)
+async def upsert_preference(
+    body: PreferenceWrite,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> Preference:
+    _require_business_writes()
+    subject = _recipient(body.subject, body.channel)
+    topic = body.topic or ""
+    encoded_metadata = json.dumps(body.metadata, sort_keys=True, separators=(",", ":"))
+    if len(encoded_metadata.encode("utf-8")) > 8192:
+        raise HTTPException(status_code=413, detail="preference_metadata_too_large")
+    payload = body.model_dump(mode="json", exclude={"expected_version"}) | {"subject": subject}
+    fingerprint = _domain_fingerprint("preference.upsert", f"{body.channel.value}:{subject}:{topic}", payload)
+    replay = await session.scalar(select(PreferenceModel).where(
+        PreferenceModel.tenant_id == x_tenant_id,
+        PreferenceModel.idempotency_key == idempotency_key,
+    ))
+    if replay is not None:
+        if replay.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        return _preference_response(replay)
+    row = await session.scalar(
+        select(PreferenceModel).where(
+            PreferenceModel.tenant_id == x_tenant_id,
+            PreferenceModel.subject == subject,
+            PreferenceModel.channel == body.channel.value,
+            PreferenceModel.topic == topic,
+        ).with_for_update()
+    )
+    if row is None:
+        if body.expected_version is not None:
+            raise HTTPException(status_code=409, detail="preference_not_found_for_expected_version")
+        row = PreferenceModel(
+            tenant_id=x_tenant_id, subject=subject, channel=body.channel.value,
+            topic=topic, consent=body.consent, source=body.source,
+            metadata_json=encoded_metadata, idempotency_key=idempotency_key,
+            request_fingerprint=fingerprint,
+        )
+        session.add(row)
+    else:
+        if body.expected_version is None or row.resource_version != body.expected_version:
+            raise HTTPException(status_code=409, detail="stale_resource_version")
+        row.consent = body.consent
+        row.source = body.source
+        row.metadata_json = encoded_metadata
+        row.idempotency_key = idempotency_key
+        row.request_fingerprint = fingerprint
+        row.resource_version += 1
+    try:
+        await session.flush()
+        _audit_domain(
+            session, tenant_id=x_tenant_id, aggregate_type="preference", aggregate_id=row.id,
+            action="communication.preference.upserted", request=request,
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        winner = await session.scalar(select(PreferenceModel).where(
+            PreferenceModel.tenant_id == x_tenant_id,
+            PreferenceModel.idempotency_key == idempotency_key,
+        ))
+        if winner is None or winner.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="preference_conflict") from exc
+        row = winner
+    await session.refresh(row)
+    return _preference_response(row)
 
 
 @router.post(

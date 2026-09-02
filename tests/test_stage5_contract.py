@@ -20,6 +20,11 @@ def test_canonical_communications_route_is_plural_and_stable():
     assert "/v1/communications/operations" in paths
     assert "/v1/communications/operations/{operation_id}" in paths
     assert "/v1/communications/operations/{operation_id}/reconcile" in paths
+    assert "/v1/communications/preferences" in paths
+    assert "/v1/communications/recipients/{recipient_id}/preferences" in paths
+    assert {"get", "put", "post"}.issubset(
+        app.openapi()["paths"]["/v1/communications/preferences"]
+    )
     assert "/v1/messages" not in paths
     assert "/v1/communication/messages" not in paths
 

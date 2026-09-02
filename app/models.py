@@ -135,6 +135,28 @@ class ConsentModel(Base):
     )
 
 
+class PreferenceModel(Base):
+    __tablename__ = "communication_preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    subject: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    topic: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    consent: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(String(120), nullable=False, default="unspecified")
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "subject", "channel", "topic", name="uq_communication_preference"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_communication_preference_idempotency"),
+    )
+
+
 class SuppressionModel(Base):
     __tablename__ = "communication_suppressions"
 

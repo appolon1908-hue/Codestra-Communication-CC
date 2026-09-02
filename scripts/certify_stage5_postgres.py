@@ -8,14 +8,15 @@ from pathlib import Path
 import asyncpg
 
 ROOT = Path(__file__).resolve().parents[1]
-UP = [ROOT / "migrations/001_stage4.sql", ROOT / "migrations/002_stage5.sql", ROOT / "migrations/003_message_lifecycle.sql", ROOT / "migrations/004_policy_templates.sql", ROOT / "migrations/005_delivery_control.sql", ROOT / "migrations/006_event_outbox.sql"]
-DOWN = [ROOT / "migrations/006_event_outbox.down.sql", ROOT / "migrations/005_delivery_control.down.sql", ROOT / "migrations/004_policy_templates.down.sql", ROOT / "migrations/003_message_lifecycle.down.sql", ROOT / "migrations/002_stage5.down.sql", ROOT / "migrations/001_stage4.down.sql"]
+UP = [ROOT / "migrations/001_stage4.sql", ROOT / "migrations/002_stage5.sql", ROOT / "migrations/003_message_lifecycle.sql", ROOT / "migrations/004_policy_templates.sql", ROOT / "migrations/005_delivery_control.sql", ROOT / "migrations/006_event_outbox.sql", ROOT / "migrations/007_preferences.sql"]
+DOWN = [ROOT / "migrations/007_preferences.down.sql", ROOT / "migrations/006_event_outbox.down.sql", ROOT / "migrations/005_delivery_control.down.sql", ROOT / "migrations/004_policy_templates.down.sql", ROOT / "migrations/003_message_lifecycle.down.sql", ROOT / "migrations/002_stage5.down.sql", ROOT / "migrations/001_stage4.down.sql"]
 TABLES = (
     "messages", "communication_consents", "communication_suppressions",
     "communication_message_events", "communication_message_mutations", "communication_audit_events",
     "communication_templates", "communication_domain_mutations",
     "communication_operations", "communication_delivery_outbox", "communication_provider_inbox",
     "communication_event_outbox",
+    "communication_preferences",
 )
 
 
