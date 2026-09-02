@@ -14,7 +14,8 @@ pytestmark = pytest.mark.postgres
 
 
 @pytest.mark.asyncio
-async def test_consent_suppression_idempotency_and_tenant_isolation():
+async def test_consent_suppression_idempotency_and_tenant_isolation(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
     engine = create_async_engine(os.environ["DATABASE_URL"])
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     tenant_a = f"tenant-a-{uuid.uuid4()}"

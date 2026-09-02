@@ -23,6 +23,7 @@ from .models import ConsentModel, MessageModel, SuppressionModel
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
 router = APIRouter(prefix="/v1/communications")
 EXTERNAL_DELIVERY_ENABLED = os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").lower() == "true"
+BUSINESS_WRITES_ENABLED = os.getenv("BUSINESS_WRITES_ENABLED", "false").lower() == "true"
 SERVICE = "codestra-communication"
 
 
@@ -30,7 +31,10 @@ SERVICE = "codestra-communication"
 async def operational_headers(request: Request, call_next):
     correlation_id = request.headers.get("X-Correlation-ID") or str(uuid4())
     request.state.correlation_id = correlation_id
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        response = JSONResponse(status_code=500, content={"detail": "internal_error", "correlation_id": correlation_id})
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Correlation-ID"] = correlation_id
     return response
@@ -129,12 +133,12 @@ def capabilities(request: Request = None) -> dict[str, object]:
         "service": SERVICE,
         "maintenance_mode": os.getenv("MAINTENANCE_MODE", "false").lower() == "true",
         "degraded_mode": False,
-        "business_writes_enabled": False,
+        "business_writes_enabled": BUSINESS_WRITES_ENABLED,
         "external_delivery_enabled": EXTERNAL_DELIVERY_ENABLED,
         "live_email_enabled": False,
         "live_sms_enabled": False,
         "live_pstn_enabled": False,
-        "read_only_mode": not EXTERNAL_DELIVERY_ENABLED,
+        "read_only_mode": not BUSINESS_WRITES_ENABLED,
         "simulation_enabled": not EXTERNAL_DELIVERY_ENABLED,
         "supported_api_versions": ["v1"],
         "email": True,
@@ -155,6 +159,8 @@ async def create_message(
     idempotency_key: IdempotencyHeader,
     session: AsyncSession = Depends(get_session),
 ) -> MessageModel:
+    if not BUSINESS_WRITES_ENABLED:
+        raise HTTPException(status_code=423, detail="business_writes_disabled")
     tenant_id = _tenant(x_tenant_id, body.tenant_id)
     if body.idempotency_key is not None and body.idempotency_key != idempotency_key:
         raise HTTPException(status_code=400, detail="idempotency_header_body_mismatch")

@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from app.main import app, capabilities, health, version
+from app.main import BUSINESS_WRITES_ENABLED, app, capabilities, health, version
 
 
 def test_operational_endpoints_are_attributable_and_fail_closed():
@@ -13,6 +13,7 @@ def test_operational_endpoints_are_attributable_and_fail_closed():
     assert value["external_delivery_enabled"] is False
     assert value["live_email_enabled"] is False
     assert value["live_sms_enabled"] is False
+    assert BUSINESS_WRITES_ENABLED is False
 
 
 def test_version_does_not_invent_runtime_attribution():
