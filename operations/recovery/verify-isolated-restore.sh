@@ -3,32 +3,58 @@ set -euo pipefail
 umask 077
 
 [[ "${ALLOW_ISOLATED_RESTORE:-false}" == "true" ]] || { echo "isolated restore requires explicit authorization" >&2; exit 2; }
-required=(PGHOST PGPORT PGDATABASE PGUSER PGPASSFILE CODESTRA_COMMUNICATION_BACKUP_DIR CODESTRA_COMMUNICATION_RESTORE_EVIDENCE_DIR)
+required=(PGHOST PGPORT PGDATABASE PGUSER PGPASSFILE CODESTRA_COMMUNICATION_BACKUP_DIR CODESTRA_COMMUNICATION_RESTORE_EVIDENCE_DIR CODESTRA_COMMUNICATION_RECOVERY_WORK_ROOT CODESTRA_EXPECTED_RELEASE_SHA CODESTRA_EXPECTED_IMAGE_DIGEST CODESTRA_BACKUP_GPG_SIGNING_FINGERPRINT)
 for name in "${required[@]}"; do
   [[ -n "${!name:-}" ]] || { echo "required recovery setting is missing: $name" >&2; exit 2; }
 done
 backup_dir=$CODESTRA_COMMUNICATION_BACKUP_DIR
 evidence_root=$CODESTRA_COMMUNICATION_RESTORE_EVIDENCE_DIR
+[[ "$CODESTRA_EXPECTED_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "expected release SHA is invalid" >&2; exit 2; }
+[[ "$CODESTRA_EXPECTED_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "expected image digest is invalid" >&2; exit 2; }
+[[ "$CODESTRA_BACKUP_GPG_SIGNING_FINGERPRINT" =~ ^[A-Fa-f0-9]{40}$ ]] || { echo "backup signing fingerprint is invalid" >&2; exit 2; }
+CODESTRA_BACKUP_GPG_SIGNING_FINGERPRINT=${CODESTRA_BACKUP_GPG_SIGNING_FINGERPRINT^^}
 [[ ! -L "$PGPASSFILE" && -f "$PGPASSFILE" ]] || { echo "protected PostgreSQL passfile is invalid" >&2; exit 2; }
 passfile_mode=$(stat -c '%a' "$PGPASSFILE")
 [[ "$passfile_mode" == "400" || "$passfile_mode" == "600" ]] || { echo "unsafe PostgreSQL passfile mode" >&2; exit 2; }
 [[ "$(stat -c '%u' "$PGPASSFILE")" == "$(id -u)" ]] || { echo "PostgreSQL passfile owner mismatch" >&2; exit 2; }
-for file in database.dump.gpg METADATA SHA256SUMS; do
+[[ ! -L "$CODESTRA_COMMUNICATION_RECOVERY_WORK_ROOT" && -d "$CODESTRA_COMMUNICATION_RECOVERY_WORK_ROOT" ]] || { echo "recovery work root is invalid" >&2; exit 2; }
+[[ "$(findmnt -n -o FSTYPE -T "$CODESTRA_COMMUNICATION_RECOVERY_WORK_ROOT")" == tmpfs ]] || { echo "plaintext recovery work requires tmpfs" >&2; exit 2; }
+for file in database.dump.gpg METADATA SIGNED-MANIFEST SIGNED-MANIFEST.sig SHA256SUMS; do
   [[ -f "$backup_dir/$file" ]] || { echo "backup artifact is missing: $file" >&2; exit 2; }
 done
 (cd "$backup_dir" && sha256sum -c SHA256SUMS)
+signature_status=$(gpg --batch --status-fd=1 --verify "$backup_dir/SIGNED-MANIFEST.sig" "$backup_dir/SIGNED-MANIFEST" 2>/dev/null)
+valid_fingerprint=$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" {print toupper($3)}' <<<"$signature_status")
+[[ "$valid_fingerprint" == "$CODESTRA_BACKUP_GPG_SIGNING_FINGERPRINT" ]] || { echo "backup signature verification failed" >&2; exit 2; }
+(cd "$backup_dir" && sha256sum -c SIGNED-MANIFEST)
 metadata_value() { sed -n "s/^$1=//p" "$backup_dir/METADATA"; }
 [[ "$(metadata_value SCHEMA)" == "codestra-communication-backup.v1" ]] || { echo "unsupported backup schema" >&2; exit 2; }
 source_database=$(metadata_value DATABASE)
 release_sha=$(metadata_value RELEASE_SHA)
 image_digest=$(metadata_value IMAGE_DIGEST)
+signing_fingerprint=$(metadata_value SIGNING_FINGERPRINT)
 [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "invalid backup release SHA" >&2; exit 2; }
 [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "invalid backup image digest" >&2; exit 2; }
+[[ "$release_sha" == "$CODESTRA_EXPECTED_RELEASE_SHA" ]] || { echo "backup release SHA mismatch" >&2; exit 2; }
+[[ "$image_digest" == "$CODESTRA_EXPECTED_IMAGE_DIGEST" ]] || { echo "backup image digest mismatch" >&2; exit 2; }
+[[ "$signing_fingerprint" == "$CODESTRA_BACKUP_GPG_SIGNING_FINGERPRINT" ]] || { echo "backup signing identity mismatch" >&2; exit 2; }
 target_database=$(psql -XAtq -v ON_ERROR_STOP=1 -c 'select current_database()')
 [[ "$target_database" != "$source_database" ]] || { echo "refusing restore into source database identity" >&2; exit 2; }
 [[ "$target_database" =~ (^|_)restore(_|$) ]] || { echo "restore target is not explicitly isolated" >&2; exit 2; }
+existing_user_objects=$(psql -XAtq -v ON_ERROR_STOP=1 <<'SQL'
+with user_namespaces as (select oid, nspname from pg_namespace where nspname <> 'information_schema' and nspname !~ '^pg_'),
+object_counts as (
+  select count(*)::bigint amount from user_namespaces where nspname <> 'public'
+  union all select count(*) from pg_class c join user_namespaces n on n.oid=c.relnamespace
+  union all select count(*) from pg_proc p join user_namespaces n on n.oid=p.pronamespace
+  union all select count(*) from pg_type t join user_namespaces n on n.oid=t.typnamespace
+  union all select count(*) from pg_extension where extname <> 'plpgsql'
+) select coalesce(sum(amount), 0) from object_counts;
+SQL
+)
+[[ "$existing_user_objects" == 0 ]] || { echo "isolated restore database contains user objects" >&2; exit 2; }
 
-work=$(mktemp -d)
+work=$(mktemp -d "$CODESTRA_COMMUNICATION_RECOVERY_WORK_ROOT/restore.XXXXXX")
 cleanup() { find "$work" -mindepth 1 -delete 2>/dev/null || true; rmdir "$work" 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 gpg --batch --quiet --decrypt --output "$work/database.dump" "$backup_dir/database.dump.gpg"
