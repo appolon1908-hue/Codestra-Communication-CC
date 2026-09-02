@@ -736,8 +736,6 @@ async def reconcile_operation(
         raise HTTPException(status_code=409, detail="stale_resource_version")
     if target.state != "reconciliation_required":
         raise HTTPException(status_code=409, detail="operation_not_reconcilable")
-    if not target.middleware_operation_id:
-        raise HTTPException(status_code=409, detail="middleware_operation_identity_unknown")
     operation = CommunicationOperationModel(
         tenant_id=x_tenant_id,
         message_id=message.id,
@@ -1440,6 +1438,7 @@ async def provider_result(
         "bounced": {"complained"},
         "complained": set(),
         "cancelled": set(),
+        "reconciliation_required": {"sent", "delivered", "failed", "bounced", "complained", "cancelled"},
     }
     transition_allowed = (
         event.event_type == previous

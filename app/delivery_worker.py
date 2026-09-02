@@ -236,7 +236,28 @@ async def run_once(
     if claim is None:
         return False
     try:
-        result = await client.dispatch(claim.payload)
+        dispatch_payload = claim.payload
+        if claim.payload.get("action") == "reconcile" and not claim.payload.get("middleware_operation_id"):
+            try:
+                target_id = UUID(str(claim.payload["target_operation_id"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise MiddlewareDeliveryError(
+                    "reconciliation_target_invalid", retryable=False
+                ) from exc
+            async with session_factory() as session:
+                original = await session.scalar(
+                    select(DeliveryOutboxModel).where(
+                        DeliveryOutboxModel.operation_id == target_id,
+                        DeliveryOutboxModel.tenant_id == str(claim.payload.get("tenant_id", "")),
+                    )
+                )
+            if original is None:
+                raise MiddlewareDeliveryError("reconciliation_source_missing", retryable=False)
+            # Replay the exact original command with its original operation UUID as
+            # the Middleware Idempotency-Key. Middleware returns the pre-existing
+            # operation when it accepted the ambiguous request, without another effect.
+            dispatch_payload = json.loads(original.payload_json)
+        result = await client.dispatch(dispatch_payload)
     except MiddlewareDeliveryError as exc:
         await fail(claim, exc, max_attempts, session_factory=session_factory)
     else:

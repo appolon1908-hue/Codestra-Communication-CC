@@ -355,7 +355,20 @@ async def test_reconciliation_is_durable_and_reads_middleware_status(monkeypatch
                 state="reconciliation_required",
                 idempotency_key=f"delivery-{uuid.uuid4()}",
                 correlation_id=f"corr-{uuid.uuid4()}",
-                middleware_operation_id="middleware-operation-reconcile",
+                middleware_operation_id=None,
+            )
+        )
+        session.add(
+            DeliveryOutboxModel(
+                tenant_id=tenant_id,
+                operation_id=target_id,
+                state="reconciliation_required",
+                payload_json=json.dumps({
+                    "operation_id": str(target_id), "message_id": str(message_id),
+                    "channel": "email", "recipient": "reconcile@example.invalid",
+                    "template_key": "transactional.test", "purpose": "transactional",
+                    "tenant_id": tenant_id, "correlation_id": f"corr-{uuid.uuid4()}",
+                }, sort_keys=True, separators=(",", ":")),
             )
         )
         await session.commit()
@@ -372,8 +385,8 @@ async def test_reconciliation_is_durable_and_reads_middleware_status(monkeypatch
 
     class Client:
         async def dispatch(self, payload):
-            assert payload["action"] == "reconcile"
-            assert payload["middleware_operation_id"] == "middleware-operation-reconcile"
+            assert "action" not in payload
+            assert payload["operation_id"] == str(target_id)
             return MiddlewareResult("middleware-operation-reconcile", "completed")
 
     assert await run_delivery_once(Client(), lease_seconds=30, max_attempts=3, session_factory=sessions)
