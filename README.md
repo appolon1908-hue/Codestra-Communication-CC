@@ -15,10 +15,13 @@ same immutable image:
 
 Apply migrations using the one-shot migration process before starting a new
 release. Normal application startup never performs migrations. The current
-schema identity is `010_data_protection_enforcement`. Upgrade sequencing is
-`009` → `scripts/backfill_data_protection.py` → `010`; rollback sequencing is
-`010 down` → explicitly confirmed `scripts/restore_plaintext_for_rollback.py`
-→ `009 down`.
+schema identity is `010_data_protection_enforcement`. Run
+`scripts/backfill_data_protection.py` as the one-shot migration from schema
+`008`; it applies `009`, locks all affected tables, converts the data, and
+applies `010` in one transaction. Do not apply `009` as an independently
+committed production step. The explicitly confirmed
+`scripts/restore_plaintext_for_rollback.py` reverses `010`, restores all
+plaintext required by the prior release, and reverses `009` atomically.
 
 Recipient identifiers, consent/preference subjects, template content, and
 delivery commands are encrypted with AES-256-GCM before persistence. Set

@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import asyncpg
 
 from app.data_protection import blind_index, protect, unprotect
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def dsn() -> str:
@@ -45,6 +49,15 @@ async def main() -> None:
     try:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(6510965169)")
+            # Schema expansion, data conversion, and final enforcement are one
+            # atomic migration. No protected-only/legacy split state is ever
+            # committed, and ACCESS EXCLUSIVE locks prevent concurrent writers.
+            await conn.execute((ROOT / "migrations/009_data_protection_columns.sql").read_text())
+            await conn.execute(
+                "LOCK TABLE messages, communication_consents, communication_suppressions, "
+                "communication_preferences, communication_templates, "
+                "communication_delivery_outbox IN ACCESS EXCLUSIVE MODE"
+            )
             counts["messages"] = await _protected_rows(
                 conn, "messages", "recipient", "recipient_ciphertext", "recipient_hash", "message-recipient"
             )
@@ -97,6 +110,7 @@ async def main() -> None:
                     row["id"],
                 )
             counts["delivery_outbox"] = len(outbox)
+            await conn.execute((ROOT / "migrations/010_data_protection_enforcement.sql").read_text())
     finally:
         await conn.close()
     print("COMMUNICATION_DATA_PROTECTION_BACKFILL=PASS " + " ".join(f"{k}={v}" for k, v in counts.items()))

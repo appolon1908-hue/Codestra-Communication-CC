@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import asyncpg
 
 from app.data_protection import unprotect
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def dsn() -> str:
@@ -25,6 +29,14 @@ async def main() -> None:
     try:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock(6510965169)")
+            await conn.execute(
+                (ROOT / "migrations/010_data_protection_enforcement.down.sql").read_text()
+            )
+            await conn.execute(
+                "LOCK TABLE messages, communication_consents, communication_suppressions, "
+                "communication_preferences, communication_templates, "
+                "communication_delivery_outbox IN ACCESS EXCLUSIVE MODE"
+            )
             specs = (
                 ("messages", "recipient", "recipient_ciphertext", "message-recipient"),
                 ("communication_consents", "subject_key", "subject_ciphertext", "consent-subject"),
@@ -62,6 +74,9 @@ async def main() -> None:
                 await conn.execute(
                     "UPDATE communication_delivery_outbox SET payload_json=$1 WHERE id=$2", clear, row["id"]
                 )
+            await conn.execute(
+                (ROOT / "migrations/009_data_protection_columns.down.sql").read_text()
+            )
     finally:
         await conn.close()
     print("COMMUNICATION_PLAINTEXT_ROLLBACK_PREPARATION=PASS")
