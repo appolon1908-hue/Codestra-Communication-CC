@@ -27,6 +27,10 @@ def test_canonical_communications_route_is_plural_and_stable():
     assert "/v1/communications/templates/{template_id}/render" in paths
     assert "/v1/communications/provider-health" in paths
     assert "/v1/communications/usage" in paths
+    assert "/v1/communications/domains" in paths
+    assert "/v1/communications/domains/{domain_id}" in paths
+    assert "/v1/communications/sender-identities" in paths
+    assert "/v1/communications/sender-identities/{sender_identity_id}" in paths
     assert {"get", "put", "post"}.issubset(
         app.openapi()["paths"]["/v1/communications/preferences"]
     )

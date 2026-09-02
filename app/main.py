@@ -34,6 +34,8 @@ from .models import (
     MessageMutationModel,
     ProviderInboxModel,
     PreferenceModel,
+    SenderIdentityModel,
+    SendingDomainModel,
     SuppressionModel,
     TemplateModel,
 )
@@ -291,6 +293,56 @@ class UsageReport(BaseModel):
     from_at: datetime = Field(serialization_alias="from")
     to: datetime
     totals: list[UsageTotal]
+
+
+class DomainWrite(BaseModel):
+    domain: str = Field(min_length=1, max_length=253)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    model_config = {"extra": "forbid"}
+
+
+class SendingDomain(BaseModel):
+    domain_id: UUID
+    domain: str
+    metadata: dict[str, Any]
+    status: str
+    checks: dict[str, str]
+    resource_version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class SendingDomainList(BaseModel):
+    items: list[SendingDomain]
+    next_cursor: str | None = None
+
+
+class SenderIdentityWrite(BaseModel):
+    channel: Channel
+    address: str = Field(min_length=1, max_length=300)
+    display_name: str | None = Field(default=None, max_length=160)
+    domain_id: UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    expected_version: int | None = Field(default=None, ge=1)
+    model_config = {"extra": "forbid"}
+
+
+class SenderIdentity(BaseModel):
+    sender_identity_id: UUID
+    channel: Channel
+    address: str
+    display_name: str | None
+    domain_id: UUID | None
+    metadata: dict[str, Any]
+    status: str
+    resource_version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class SenderIdentityList(BaseModel):
+    items: list[SenderIdentity]
+    next_cursor: str | None = None
 
 
 class Operation(BaseModel):
@@ -1480,6 +1532,249 @@ async def upsert_preference(
         row = winner
     await session.refresh(row)
     return _preference_response(row)
+
+
+def _bounded_metadata(value: dict[str, Any]) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > 8192:
+        raise HTTPException(status_code=413, detail="metadata_too_large")
+    return encoded
+
+
+def _normalize_domain(value: str) -> str:
+    candidate = value.strip().rstrip(".").lower()
+    try:
+        candidate = candidate.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise HTTPException(status_code=422, detail="domain_invalid") from exc
+    if len(candidate) > 253 or not re.fullmatch(
+        r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?",
+        candidate,
+    ):
+        raise HTTPException(status_code=422, detail="domain_invalid")
+    return candidate
+
+
+def _domain_response(row: SendingDomainModel) -> SendingDomain:
+    return SendingDomain(
+        domain_id=row.id, domain=row.domain, metadata=json.loads(row.metadata_json),
+        status=row.status,
+        checks={"spf": row.spf, "dkim": row.dkim, "dmarc": row.dmarc,
+                "reverseDns": row.reverse_dns, "tls": row.tls, "bimi": row.bimi},
+        resource_version=row.resource_version, created_at=row.created_at, updated_at=row.updated_at,
+    )
+
+
+@router.post(
+    "/domains", response_model=SendingDomain, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_scope("communications.domains.write"))],
+)
+async def create_domain(
+    body: DomainWrite, x_tenant_id: TenantHeader, idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session), request: Request = None,
+) -> SendingDomain:
+    _require_business_writes()
+    domain = _normalize_domain(body.domain)
+    metadata_json = _bounded_metadata(body.metadata)
+    fingerprint = _domain_fingerprint("domain.create", domain, {"domain": domain, "metadata": body.metadata})
+    replay = await session.scalar(select(SendingDomainModel).where(
+        SendingDomainModel.tenant_id == x_tenant_id,
+        SendingDomainModel.idempotency_key == idempotency_key,
+    ))
+    if replay is not None:
+        if replay.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        return _domain_response(replay)
+    row = SendingDomainModel(
+        tenant_id=x_tenant_id, domain=domain, status="dns_required",
+        metadata_json=metadata_json, idempotency_key=idempotency_key,
+        request_fingerprint=fingerprint,
+    )
+    session.add(row)
+    try:
+        await session.flush()
+        _audit_domain(session, tenant_id=x_tenant_id, aggregate_type="sending_domain",
+                      aggregate_id=row.id, action="communication.domain.registered", request=request)
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        winner = await session.scalar(select(SendingDomainModel).where(
+            SendingDomainModel.tenant_id == x_tenant_id,
+            SendingDomainModel.idempotency_key == idempotency_key,
+        ))
+        if winner is None or winner.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="domain_conflict") from exc
+        row = winner
+    await session.refresh(row)
+    return _domain_response(row)
+
+
+@router.get("/domains", response_model=SendingDomainList,
+            dependencies=[Depends(require_scope("communications.domains.read"))])
+async def list_domains(
+    x_tenant_id: TenantHeader, cursor: UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=100), session: AsyncSession = Depends(get_session),
+) -> SendingDomainList:
+    statement = select(SendingDomainModel).where(SendingDomainModel.tenant_id == x_tenant_id)
+    if cursor is not None:
+        statement = statement.where(SendingDomainModel.id > cursor)
+    rows = list((await session.scalars(statement.order_by(SendingDomainModel.id).limit(limit + 1))).all())
+    return SendingDomainList(items=[_domain_response(row) for row in rows[:limit]],
+                             next_cursor=str(rows[limit - 1].id) if len(rows) > limit else None)
+
+
+@router.get("/domains/{domain_id}", response_model=SendingDomain,
+            dependencies=[Depends(require_scope("communications.domains.read"))])
+async def get_domain(domain_id: UUID, x_tenant_id: TenantHeader,
+                     session: AsyncSession = Depends(get_session)) -> SendingDomain:
+    row = await session.scalar(select(SendingDomainModel).where(
+        SendingDomainModel.id == domain_id, SendingDomainModel.tenant_id == x_tenant_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="domain_not_found")
+    return _domain_response(row)
+
+
+def _sender_response(row: SenderIdentityModel) -> SenderIdentity:
+    return SenderIdentity(
+        sender_identity_id=row.id, channel=Channel(row.channel), address=row.address,
+        display_name=row.display_name, domain_id=row.domain_id,
+        metadata=json.loads(row.metadata_json), status=row.status,
+        resource_version=row.resource_version, created_at=row.created_at, updated_at=row.updated_at,
+    )
+
+
+async def _sender_domain(
+    session: AsyncSession, tenant_id: str, body: SenderIdentityWrite,
+) -> SendingDomainModel | None:
+    address = _recipient(body.address, body.channel)
+    if body.channel == Channel.EMAIL:
+        parts = address.rsplit("@", 1)
+        address_domain = parts[-1] if len(parts) == 2 and 0 < len(parts[0]) <= 64 else ""
+        if not address_domain or body.domain_id is None:
+            raise HTTPException(status_code=422, detail="email_sender_domain_required")
+        domain = await session.scalar(select(SendingDomainModel).where(
+            SendingDomainModel.id == body.domain_id,
+            SendingDomainModel.tenant_id == tenant_id,
+        ))
+        if domain is None or domain.domain != _normalize_domain(address_domain):
+            raise HTTPException(status_code=409, detail="sender_domain_mismatch")
+        return domain
+    if body.domain_id is not None:
+        raise HTTPException(status_code=422, detail="domain_not_applicable_to_channel")
+    return None
+
+
+@router.post(
+    "/sender-identities", response_model=SenderIdentity, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_scope("communications.senders.write"))],
+)
+async def create_sender_identity(
+    body: SenderIdentityWrite, x_tenant_id: TenantHeader, idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session), request: Request = None,
+) -> SenderIdentity:
+    _require_business_writes()
+    if body.expected_version is not None:
+        raise HTTPException(status_code=409, detail="sender_not_found_for_expected_version")
+    domain = await _sender_domain(session, x_tenant_id, body)
+    address = _recipient(body.address, body.channel)
+    metadata_json = _bounded_metadata(body.metadata)
+    payload = body.model_dump(mode="json") | {"address": address}
+    fingerprint = _domain_fingerprint("sender.create", f"{body.channel.value}:{address}", payload)
+    replay = await session.scalar(select(SenderIdentityModel).where(
+        SenderIdentityModel.tenant_id == x_tenant_id,
+        SenderIdentityModel.idempotency_key == idempotency_key,
+    ))
+    if replay is not None:
+        if replay.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="idempotency_conflict")
+        return _sender_response(replay)
+    row = SenderIdentityModel(
+        tenant_id=x_tenant_id, channel=body.channel.value, address=address,
+        display_name=body.display_name, domain_id=body.domain_id, metadata_json=metadata_json,
+        status="active" if domain is not None and domain.status in {"verified", "sending_enabled"} else "pending",
+        idempotency_key=idempotency_key, request_fingerprint=fingerprint,
+    )
+    session.add(row)
+    try:
+        await session.flush()
+        _audit_domain(session, tenant_id=x_tenant_id, aggregate_type="sender_identity",
+                      aggregate_id=row.id, action="communication.sender.registered", request=request)
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        winner = await session.scalar(select(SenderIdentityModel).where(
+            SenderIdentityModel.tenant_id == x_tenant_id,
+            SenderIdentityModel.idempotency_key == idempotency_key,
+        ))
+        if winner is None or winner.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail="sender_conflict") from exc
+        row = winner
+    await session.refresh(row)
+    return _sender_response(row)
+
+
+@router.get("/sender-identities", response_model=SenderIdentityList,
+            dependencies=[Depends(require_scope("communications.senders.read"))])
+async def list_sender_identities(
+    x_tenant_id: TenantHeader, cursor: UUID | None = None,
+    limit: int = Query(default=50, ge=1, le=100), session: AsyncSession = Depends(get_session),
+) -> SenderIdentityList:
+    statement = select(SenderIdentityModel).where(SenderIdentityModel.tenant_id == x_tenant_id)
+    if cursor is not None:
+        statement = statement.where(SenderIdentityModel.id > cursor)
+    rows = list((await session.scalars(statement.order_by(SenderIdentityModel.id).limit(limit + 1))).all())
+    return SenderIdentityList(items=[_sender_response(row) for row in rows[:limit]],
+                              next_cursor=str(rows[limit - 1].id) if len(rows) > limit else None)
+
+
+@router.get("/sender-identities/{sender_identity_id}", response_model=SenderIdentity,
+            dependencies=[Depends(require_scope("communications.senders.read"))])
+async def get_sender_identity(sender_identity_id: UUID, x_tenant_id: TenantHeader,
+                              session: AsyncSession = Depends(get_session)) -> SenderIdentity:
+    row = await session.scalar(select(SenderIdentityModel).where(
+        SenderIdentityModel.id == sender_identity_id,
+        SenderIdentityModel.tenant_id == x_tenant_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="sender_identity_not_found")
+    return _sender_response(row)
+
+
+@router.put("/sender-identities/{sender_identity_id}", response_model=SenderIdentity,
+            dependencies=[Depends(require_scope("communications.senders.write"))])
+async def update_sender_identity(
+    sender_identity_id: UUID, body: SenderIdentityWrite, x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader, session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> SenderIdentity:
+    _require_business_writes()
+    row = await session.scalar(select(SenderIdentityModel).where(
+        SenderIdentityModel.id == sender_identity_id,
+        SenderIdentityModel.tenant_id == x_tenant_id).with_for_update())
+    if row is None:
+        raise HTTPException(status_code=404, detail="sender_identity_not_found")
+    if body.expected_version is None or row.resource_version != body.expected_version:
+        raise HTTPException(status_code=409, detail="stale_resource_version")
+    domain = await _sender_domain(session, x_tenant_id, body)
+    address = _recipient(body.address, body.channel)
+    payload = body.model_dump(mode="json") | {"address": address}
+    if not await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="sender_identity",
+        aggregate_key=str(sender_identity_id), kind="sender.update",
+        idempotency_key=idempotency_key, payload=payload, result_version=row.resource_version + 1,
+    ):
+        return _sender_response(row)
+    row.channel = body.channel.value
+    row.address = address
+    row.display_name = body.display_name
+    row.domain_id = body.domain_id
+    row.metadata_json = _bounded_metadata(body.metadata)
+    row.status = "active" if domain is not None and domain.status in {"verified", "sending_enabled"} else "pending"
+    row.resource_version += 1
+    _audit_domain(session, tenant_id=x_tenant_id, aggregate_type="sender_identity",
+                  aggregate_id=row.id, action="communication.sender.updated", request=request)
+    await session.commit()
+    await session.refresh(row)
+    return _sender_response(row)
 
 
 @router.post(

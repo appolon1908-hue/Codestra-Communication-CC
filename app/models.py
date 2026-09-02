@@ -199,6 +199,61 @@ class TemplateModel(Base):
     )
 
 
+class SendingDomainModel(Base):
+    __tablename__ = "communication_sending_domains"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    domain: Mapped[str] = mapped_column(String(253), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="dns_required")
+    spf: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    dkim: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    dmarc: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    reverse_dns: Mapped[str] = mapped_column(String(24), nullable=False, default="not_configured")
+    tls: Mapped[str] = mapped_column(String(24), nullable=False, default="not_configured")
+    bimi: Mapped[str] = mapped_column(String(24), nullable=False, default="not_configured")
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "domain", name="uq_communication_sending_domain"),
+        UniqueConstraint("tenant_id", "id", name="uq_communication_domain_tenant_id"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_communication_domain_idempotency"),
+    )
+
+
+class SenderIdentityModel(Base):
+    __tablename__ = "communication_sender_identities"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    address: Mapped[str] = mapped_column(String(300), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    metadata_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="pending")
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "domain_id"], ["communication_sending_domains.tenant_id", "communication_sending_domains.id"],
+            ondelete="RESTRICT", name="fk_communication_sender_domain",
+        ),
+        UniqueConstraint("tenant_id", "channel", "address", name="uq_communication_sender_identity"),
+        UniqueConstraint("tenant_id", "id", name="uq_communication_sender_tenant_id"),
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_communication_sender_idempotency"),
+    )
+
+
 class DomainMutationModel(Base):
     __tablename__ = "communication_domain_mutations"
 

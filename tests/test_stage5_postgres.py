@@ -21,6 +21,8 @@ from app.main import (
     Purpose,
     ReconcileOperation,
     PreferenceWrite,
+    DomainWrite,
+    SenderIdentityWrite,
     ConsentChange,
     SuppressionCreate,
     TemplateCreate,
@@ -46,6 +48,12 @@ from app.main import (
     revoke_consent,
     reconcile_operation,
     upsert_preference,
+    create_domain,
+    create_sender_identity,
+    get_domain,
+    get_sender_identity,
+    list_domains,
+    list_sender_identities,
     update_template,
     app,
     metrics,
@@ -62,6 +70,8 @@ from app.models import (
     DeliveryOutboxModel,
     ProviderInboxModel,
     PreferenceModel,
+    SenderIdentityModel,
+    SendingDomainModel,
     SuppressionModel,
     TemplateModel,
 )
@@ -71,6 +81,48 @@ from app.middleware_client import MiddlewareDeliveryError, MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
+
+
+@pytest.mark.asyncio
+async def test_domains_and_sender_identities_are_tenant_bound_and_never_self_verify(monkeypatch):
+    monkeypatch.setattr("app.main.BUSINESS_WRITES_ENABLED", True)
+    engine = create_async_engine(os.environ["DATABASE_URL"])
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    tenant = f"tenant-sender-{uuid.uuid4()}"
+    other = f"tenant-other-{uuid.uuid4()}"
+    domain_key = f"domain-{uuid.uuid4()}"
+    async with sessions() as session:
+        domain = await create_domain(DomainWrite(domain="Example.Invalid"), tenant, domain_key, session)
+        domain_id = domain.domain_id
+        assert domain.domain == "example.invalid"
+        assert domain.status == "dns_required"
+        assert set(domain.checks.values()) <= {"pending", "not_configured"}
+    async with sessions() as session:
+        replay = await create_domain(DomainWrite(domain="example.invalid"), tenant, domain_key, session)
+        assert replay.domain_id == domain_id
+        with pytest.raises(HTTPException) as hidden:
+            await get_domain(domain_id, other, session)
+        assert hidden.value.status_code == 404
+    async with sessions() as session:
+        sender = await create_sender_identity(
+            SenderIdentityWrite(channel=Channel.EMAIL, address="Sender@Example.Invalid", domain_id=domain_id),
+            tenant, f"sender-{uuid.uuid4()}", session,
+        )
+        sender_id = sender.sender_identity_id
+        assert sender.address == "sender@example.invalid"
+        assert sender.status == "pending"
+    async with sessions() as session:
+        assert (await get_sender_identity(sender_id, tenant, session)).sender_identity_id == sender_id
+        assert len((await list_domains(tenant, None, 50, session)).items) == 1
+        assert len((await list_sender_identities(tenant, None, 50, session)).items) == 1
+        assert (await list_sender_identities(other, None, 50, session)).items == []
+        with pytest.raises(HTTPException) as mismatch:
+            await create_sender_identity(
+                SenderIdentityWrite(channel=Channel.EMAIL, address="sender@other.invalid", domain_id=domain_id),
+                tenant, f"sender-{uuid.uuid4()}", session,
+            )
+        assert mismatch.value.status_code == 409
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
