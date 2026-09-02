@@ -237,10 +237,13 @@ async def _message_event(
     previous_status: str | None,
     request: Request | None,
     safe_detail: str | None = None,
+    provider: str | None = None,
+    provider_event_type: str | None = None,
 ) -> None:
     await record_message_event(
         session, row, event_type=event_type, previous_status=previous_status,
         actor_id=_actor(request), correlation_id=_correlation(request), safe_detail=safe_detail,
+        provider=provider, provider_event_type=provider_event_type,
     )
     session.add(
         CommunicationAuditModel(
@@ -1469,6 +1472,8 @@ async def provider_result(
         previous_status=previous,
         request=request,
         safe_detail=provider if transition_allowed else f"{provider}:stale_transition",
+        provider=provider,
+        provider_event_type=event.event_type,
     )
     try:
         await session.commit()

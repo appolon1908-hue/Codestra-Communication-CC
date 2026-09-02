@@ -4,34 +4,70 @@ info:
   version: 1.0.0
   description: Sanitized, durable communication lifecycle events. Recipient and content are excluded.
 channels:
-  communicationEvents:
-    address: codestra.communication.events.v1
+  communicationMessageStatus:
+    address: codestra.communications.message.status.v1
     messages:
-      lifecycleEvent:
-        $ref: '#/components/messages/LifecycleEvent'
+      statusEvent: {$ref: '#/components/messages/StatusEvent'}
+  communicationMessageEvent:
+    address: codestra.communications.message.event.v1
+    messages:
+      providerEvent: {$ref: '#/components/messages/ProviderEvent'}
 operations:
-  publishLifecycleEvent:
+  publishStatusEvent:
     action: send
-    channel:
-      $ref: '#/channels/communicationEvents'
-    messages:
-      - $ref: '#/channels/communicationEvents/messages/lifecycleEvent'
+    channel: {$ref: '#/channels/communicationMessageStatus'}
+  publishProviderEvent:
+    action: send
+    channel: {$ref: '#/channels/communicationMessageEvent'}
 components:
   messages:
-    LifecycleEvent:
+    StatusEvent:
       contentType: application/json
-      payload:
-        type: object
-        additionalProperties: false
-        required: [specversion, id, type, source, subject, tenant_id, message_id, status, correlation_id]
-        properties:
-          specversion: {type: string, const: '1.0'}
-          id: {type: string}
-          type: {type: string, pattern: '^communication\\.message\\.'}
-          source: {type: string, const: 'urn:codestra:communication'}
-          subject: {type: string}
-          tenant_id: {type: string}
-          message_id: {type: string, format: uuid}
-          previous_status: {type: [string, 'null']}
-          status: {type: string}
-          correlation_id: {type: string}
+      payload: {$ref: '#/components/schemas/StatusEnvelope'}
+    ProviderEvent:
+      contentType: application/json
+      payload: {$ref: '#/components/schemas/ProviderEnvelope'}
+  schemas:
+    BaseEnvelope:
+      type: object
+      required: [specversion, id, type, source, subject, time, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string, format: uuid}
+        source: {type: string, const: 'urn:codestra:communication'}
+        subject: {type: string}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string, const: application/json}
+    EventData:
+      type: object
+      required: [messageId, tenantId, channel, status, correlationId, occurredAt]
+      properties:
+        messageId: {type: string, format: uuid}
+        tenantId: {type: string}
+        channel: {type: string, enum: [email, sms, voice, whatsapp, push]}
+        status: {type: string, enum: [accepted, queued, dispatched, delivered, failed, cancelled, suppressed, expired, indeterminate]}
+        previousStatus: {type: [string, 'null']}
+        correlationId: {type: string}
+        occurredAt: {type: string, format: date-time}
+    StatusEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/BaseEnvelope'}
+        - type: object
+          properties:
+            type: {const: codestra.communications.message.status.v1}
+            data: {$ref: '#/components/schemas/EventData'}
+    ProviderEnvelope:
+      allOf:
+        - {$ref: '#/components/schemas/BaseEnvelope'}
+        - type: object
+          properties:
+            type: {const: codestra.communications.message.event.v1}
+            data:
+              allOf:
+                - {$ref: '#/components/schemas/EventData'}
+                - type: object
+                  required: [eventId]
+                  properties:
+                    eventId: {type: string, format: uuid}
+                    provider: {type: [string, 'null']}
+                    providerEventType: {type: [string, 'null']}
