@@ -15,7 +15,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -148,6 +148,28 @@ class Template(BaseModel):
     active: bool
     resource_version: int
     model_config = {"from_attributes": True}
+
+
+class TemplateRenderRequest(BaseModel):
+    variables: dict[str, str | int | float | bool]
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_variables(self):
+        if len(self.variables) > 200:
+            raise ValueError("at most 200 template variables are allowed")
+        for name, value in self.variables.items():
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,79}", name):
+                raise ValueError("template variable name is invalid")
+            if len(str(value)) > 4000:
+                raise ValueError("template variable value is too long")
+        return self
+
+
+class TemplateRenderResult(BaseModel):
+    subject: str | None
+    body: str
+    missing_variables: list[str]
 
 
 class ConsentChange(BaseModel):
@@ -1030,6 +1052,44 @@ async def get_template(
     if row is None:
         raise HTTPException(status_code=404, detail="template_not_found")
     return row
+
+
+@router.post(
+    "/templates/{template_id}/render",
+    response_model=TemplateRenderResult,
+    dependencies=[Depends(require_scope("communications.templates.read"))],
+)
+async def render_template(
+    template_id: UUID,
+    body: TemplateRenderRequest,
+    x_tenant_id: TenantHeader,
+    session: AsyncSession = Depends(get_session),
+) -> TemplateRenderResult:
+    row = await session.scalar(select(TemplateModel).where(
+        TemplateModel.id == template_id,
+        TemplateModel.tenant_id == x_tenant_id,
+        TemplateModel.active.is_(True),
+    ))
+    if row is None:
+        raise HTTPException(status_code=404, detail="template_not_found")
+    pattern = re.compile(r"{{\s*([A-Za-z][A-Za-z0-9_.-]{0,79})\s*}}")
+    names = set(pattern.findall(row.body_template))
+    if row.subject_template:
+        names.update(pattern.findall(row.subject_template))
+    missing = sorted(names - body.variables.keys())
+    def substitute(value: str | None) -> str | None:
+        if value is None:
+            return None
+        return pattern.sub(
+            lambda match: str(body.variables[match.group(1)])
+            if match.group(1) in body.variables else match.group(0),
+            value,
+        )
+    return TemplateRenderResult(
+        subject=substitute(row.subject_template),
+        body=substitute(row.body_template) or "",
+        missing_variables=missing,
+    )
 
 
 @router.patch(

@@ -24,6 +24,7 @@ from app.main import (
     SuppressionCreate,
     TemplateCreate,
     TemplateUpdate,
+    TemplateRenderRequest,
     cancel_message,
     create_message,
     get_message,
@@ -40,6 +41,7 @@ from app.main import (
     list_consents,
     list_suppressions,
     list_templates,
+    render_template,
     revoke_consent,
     reconcile_operation,
     upsert_preference,
@@ -600,6 +602,18 @@ async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe
         )
         template_id = template.id
         template_version = template.resource_version
+    async with sessions() as session:
+        rendered = await render_template(
+            template_id, TemplateRenderRequest(variables={"name": "Synthetic"}),
+            tenant_id, session,
+        )
+        assert rendered.body == "Hello Synthetic"
+        assert rendered.missing_variables == []
+        missing = await render_template(
+            template_id, TemplateRenderRequest(variables={}), tenant_id, session,
+        )
+        assert missing.body == "Hello {{name}}"
+        assert missing.missing_variables == ["name"]
     async with sessions() as session:
         updated = await update_template(
             template_id,

@@ -761,6 +761,69 @@
         "title": "TemplateCreate",
         "type": "object"
       },
+      "TemplateRenderRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "variables": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "variables"
+        ],
+        "title": "TemplateRenderRequest",
+        "type": "object"
+      },
+      "TemplateRenderResult": {
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "missing_variables": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Variables",
+            "type": "array"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "subject",
+          "body",
+          "missing_variables"
+        ],
+        "title": "TemplateRenderResult",
+        "type": "object"
+      },
       "TemplateUpdate": {
         "properties": {
           "active": {
@@ -2639,6 +2702,74 @@
           }
         ],
         "summary": "Update Template"
+      }
+    },
+    "/v1/communications/templates/{template_id}/render": {
+      "post": {
+        "operationId": "render_template_v1_communications_templates__template_id__render_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Template Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "title": "X-Tenant-Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TemplateRenderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TemplateRenderResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "serviceBearer": [
+              "communications.templates.read"
+            ]
+          }
+        ],
+        "summary": "Render Template"
       }
     },
     "/v1/webhooks/communications/{provider}/results": {

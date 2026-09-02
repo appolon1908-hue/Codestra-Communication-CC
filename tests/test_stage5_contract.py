@@ -1,4 +1,6 @@
-from app.main import EXTERNAL_DELIVERY_ENABLED, app, capabilities
+import pytest
+
+from app.main import EXTERNAL_DELIVERY_ENABLED, TemplateRenderRequest, app, capabilities
 
 
 def test_committed_openapi_matches_runtime():
@@ -22,6 +24,7 @@ def test_canonical_communications_route_is_plural_and_stable():
     assert "/v1/communications/operations/{operation_id}/reconcile" in paths
     assert "/v1/communications/preferences" in paths
     assert "/v1/communications/recipients/{recipient_id}/preferences" in paths
+    assert "/v1/communications/templates/{template_id}/render" in paths
     assert {"get", "put", "post"}.issubset(
         app.openapi()["paths"]["/v1/communications/preferences"]
     )
@@ -35,3 +38,10 @@ def test_policy_capabilities_are_real_but_delivery_stays_disabled():
     assert value["suppression_enforcement"] is True
     assert value["external_delivery"] is False
     assert EXTERNAL_DELIVERY_ENABLED is False
+
+
+def test_template_render_variables_are_bounded():
+    with pytest.raises(ValueError):
+        TemplateRenderRequest(variables={"bad variable": "x"})
+    with pytest.raises(ValueError):
+        TemplateRenderRequest(variables={f"v{i}": "x" for i in range(201)})
