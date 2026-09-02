@@ -15,7 +15,10 @@ same immutable image:
 
 Apply migrations using the one-shot migration process before starting a new
 release. Normal application startup never performs migrations. The current
-schema identity is `009_data_protection_columns`.
+schema identity is `010_data_protection_enforcement`. Upgrade sequencing is
+`009` → `scripts/backfill_data_protection.py` → `010`; rollback sequencing is
+`010 down` → explicitly confirmed `scripts/restore_plaintext_for_rollback.py`
+→ `009 down`.
 
 Recipient identifiers, consent/preference subjects, template content, and
 delivery commands are encrypted with AES-256-GCM before persistence. Set

@@ -78,12 +78,28 @@ from app.models import (
     TemplateModel,
 )
 from app.delivery_worker import run_once as run_delivery_once
-from app.data_protection import reveal
+from app.data_protection import blind_index, protect, reveal
 from app.event_worker import acknowledge, claim, reject
 from app.middleware_client import MiddlewareDeliveryError, MiddlewareResult
 from sqlalchemy import func, select
 
 pytestmark = pytest.mark.postgres
+
+
+def protected_fields(value: str, tenant_id: str, purpose: str, prefix: str) -> dict[str, str | None]:
+    return {
+        prefix: None,
+        f"{prefix}_ciphertext": protect(value, tenant_id=tenant_id, purpose=purpose),
+        f"{prefix}_hash": blind_index(value, tenant_id=tenant_id, purpose=purpose),
+    }
+
+
+def protected_consent(value: str, tenant_id: str) -> dict[str, str | None]:
+    return {
+        "subject_key": None,
+        "subject_ciphertext": protect(value, tenant_id=tenant_id, purpose="consent-subject"),
+        "subject_hash": blind_index(value, tenant_id=tenant_id, purpose="consent-subject"),
+    }
 
 
 @pytest.mark.asyncio
@@ -195,8 +211,10 @@ async def test_message_event_and_publish_intent_are_atomic_sanitized_and_attempt
     tenant = f"tenant-event-{uuid.uuid4()}"
     recipient = f"private-{uuid.uuid4()}@example.invalid"
     async with sessions() as session:
-        session.add(ConsentModel(tenant_id=tenant, subject_key=recipient, channel="email",
-                                 status="granted", source="event-test"))
+        session.add(ConsentModel(
+            tenant_id=tenant, channel="email", status="granted", source="event-test",
+            **protected_consent(recipient, tenant),
+        ))
         await session.commit()
     async with sessions() as session:
         created = await create_message(MessageCreate(channel=Channel.EMAIL, recipient=recipient,
@@ -279,10 +297,10 @@ async def test_consent_suppression_idempotency_and_tenant_isolation(monkeypatch)
         session.add(
             ConsentModel(
                 tenant_id=tenant_a,
-                subject_key=recipient,
                 channel="email",
                 status="granted",
                 source="stage5-test",
+                **protected_consent(recipient, tenant_a),
             )
         )
         await session.commit()
@@ -315,8 +333,8 @@ async def test_consent_suppression_idempotency_and_tenant_isolation(monkeypatch)
             SuppressionModel(
                 tenant_id=tenant_a,
                 channel="email",
-                recipient=recipient,
                 reason="stage5-test",
+                **protected_fields(recipient, tenant_a, "suppression-recipient", "recipient"),
             )
         )
         await session.commit()
@@ -497,7 +515,9 @@ async def test_reconciliation_is_durable_and_reads_middleware_status(monkeypatch
                 id=message_id,
                 tenant_id=tenant_id,
                 channel="email",
-                recipient="reconcile@example.invalid",
+                **protected_fields(
+                    "reconcile@example.invalid", tenant_id, "message-recipient", "recipient"
+                ),
                 template_key="transactional.test",
                 purpose="transactional",
                 idempotency_key=f"message-{uuid.uuid4()}",
@@ -525,12 +545,12 @@ async def test_reconciliation_is_durable_and_reads_middleware_status(monkeypatch
                 tenant_id=tenant_id,
                 operation_id=target_id,
                 state="reconciliation_required",
-                payload_json=json.dumps({
+                payload_json=protect(json.dumps({
                     "operation_id": str(target_id), "message_id": str(message_id),
                     "channel": "email", "recipient": "reconcile@example.invalid",
                     "template_key": "transactional.test", "purpose": "transactional",
                     "tenant_id": tenant_id, "correlation_id": f"corr-{uuid.uuid4()}",
-                }, sort_keys=True, separators=(",", ":")),
+                }, sort_keys=True, separators=(",", ":")), tenant_id=tenant_id, purpose="delivery-payload"),
             )
         )
         await session.commit()
@@ -577,10 +597,13 @@ async def test_provider_webhook_is_signed_replay_safe_and_tenant_bound(monkeypat
         session.add(
             MessageModel(
                 id=message_id, tenant_id=tenant_id, channel="email",
-                recipient="webhook@example.invalid", template_key="transactional.test",
+                template_key="transactional.test",
                 purpose="transactional", idempotency_key=f"message-{uuid.uuid4()}",
                 request_fingerprint="0" * 64, status="middleware_accepted",
                 provider_message_id="provider-message-1",
+                **protected_fields(
+                    "webhook@example.invalid", tenant_id, "message-recipient", "recipient"
+                ),
             )
         )
         await session.commit()
@@ -836,10 +859,10 @@ async def test_message_acceptance_rechecks_concurrent_consent_revocation(monkeyp
         seed.add(
             ConsentModel(
                 tenant_id=tenant_id,
-                subject_key=recipient,
                 channel="email",
                 status="granted",
                 source="synthetic-race",
+                **protected_consent(recipient, tenant_id),
             )
         )
         await seed.commit()
@@ -849,7 +872,9 @@ async def test_message_acceptance_rechecks_concurrent_consent_revocation(monkeyp
         select(ConsentModel)
         .where(
             ConsentModel.tenant_id == tenant_id,
-            ConsentModel.subject_key == recipient,
+            ConsentModel.subject_hash == blind_index(
+                recipient, tenant_id=tenant_id, purpose="consent-subject"
+            ),
             ConsentModel.channel == "email",
         )
         .with_for_update()
