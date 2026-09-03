@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,9 +75,30 @@ class MiddlewareCommunicationClient:
 
     def _token(self) -> str:
         path = Path(self.token_file)
-        if not self.token_file or not path.is_file() or path.is_symlink():
+        if not self.token_file or not path.is_absolute():
             raise MiddlewareDeliveryError("middleware_token_file_invalid", retryable=False)
-        token = path.read_text(encoding="utf-8").strip()
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise MiddlewareDeliveryError("middleware_token_file_invalid", retryable=False) from exc
+        try:
+            details = os.fstat(fd)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or details.st_uid != os.geteuid()
+                or stat.S_IMODE(details.st_mode) & 0o077
+            ):
+                raise MiddlewareDeliveryError("middleware_token_file_invalid", retryable=False)
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(8193)
+        finally:
+            os.close(fd)
+        if len(raw) > 8192:
+            raise MiddlewareDeliveryError("middleware_token_file_invalid", retryable=False)
+        try:
+            token = raw.decode("utf-8", "strict").strip()
+        except UnicodeDecodeError as exc:
+            raise MiddlewareDeliveryError("middleware_token_file_invalid", retryable=False) from exc
         if not token:
             raise MiddlewareDeliveryError("middleware_token_empty", retryable=False)
         return token

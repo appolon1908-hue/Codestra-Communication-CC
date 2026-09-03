@@ -51,3 +51,24 @@ async def test_middleware_circuit_opens_and_recovers_without_dispatching(monkeyp
     result = await client.dispatch(payload)
     assert result.operation_id == "middleware-op"
     assert transport.calls == 3
+
+
+def test_middleware_token_rejects_relative_symlink_and_broad_permissions(monkeypatch, tmp_path):
+    token = tmp_path / "token"
+    token.write_text("synthetic-token", encoding="utf-8")
+    token.chmod(0o644)
+    monkeypatch.setenv("MIDDLEWARE_TOKEN_FILE", str(token))
+    client = MiddlewareCommunicationClient()
+    with pytest.raises(MiddlewareDeliveryError, match="middleware_token_file_invalid"):
+        client._token()
+    token.chmod(0o600)
+    link = tmp_path / "token-link"
+    link.symlink_to(token)
+    monkeypatch.setenv("MIDDLEWARE_TOKEN_FILE", str(link))
+    client = MiddlewareCommunicationClient()
+    with pytest.raises(MiddlewareDeliveryError, match="middleware_token_file_invalid"):
+        client._token()
+    monkeypatch.setenv("MIDDLEWARE_TOKEN_FILE", "relative-token")
+    client = MiddlewareCommunicationClient()
+    with pytest.raises(MiddlewareDeliveryError, match="middleware_token_file_invalid"):
+        client._token()
