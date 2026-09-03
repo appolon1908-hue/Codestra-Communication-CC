@@ -27,6 +27,7 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
 ## Required source evidence
 
 - PostgreSQL migrations and reversible rollback/restore evidence
+- exact-client logical backup integrity and isolated restore certification in CI
 - semantic idempotency and concurrent duplicate tests
 - cross-tenant denial and authorization mutation tests
 - committed OpenAPI 3.1 and AsyncAPI 3.0 with runtime parity
@@ -45,7 +46,7 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
   response schemas have a canonical authority; only a path is currently documented.
 - Reconcile the remaining SDK naming/schema differences and add exact cross-repo
   OpenAPI compatibility validation.
-- Add traces, alerts, backup/restore proof, staging
+- Add traces, production encrypted/off-host backup and restore proof, staging
   certification, immutable release publication, and exact-digest deployment evidence.
 
 ## Safety baseline

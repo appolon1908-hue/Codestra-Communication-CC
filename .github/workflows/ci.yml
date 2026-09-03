@@ -74,3 +74,38 @@ jobs:
       - run: python scripts/certify_stage5_postgres.py
       - run: python scripts/certify_data_protection_migration.py
       - run: pytest -q -m postgres
+      - name: Certify isolated logical backup and restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup_dir="$(mktemp -d)"
+          restore_db="codestra_communication_restore_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          postgres_image="postgres@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193"
+          pg_client() {
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              -e PGPASSWORD=postgres -v "$backup_dir:/backup" "$postgres_image" "$@"
+          }
+          cleanup() {
+            pg_client dropdb -h 127.0.0.1 -U postgres --if-exists "$restore_db" >/dev/null 2>&1 || true
+            find "$backup_dir" -type f -delete
+            rmdir "$backup_dir"
+          }
+          trap cleanup EXIT
+          pg_client pg_dump -h 127.0.0.1 -U postgres -d codestra_communication_stage5 \
+            --format=custom --no-owner --no-privileges --file=/backup/communication.dump
+          sha256sum "$backup_dir/communication.dump" > "$backup_dir/communication.dump.sha256"
+          sha256sum --check "$backup_dir/communication.dump.sha256"
+          pg_client createdb -h 127.0.0.1 -U postgres "$restore_db"
+          pg_client pg_restore -h 127.0.0.1 -U postgres -d "$restore_db" \
+            --no-owner --no-privileges --exit-on-error /backup/communication.dump
+          source_tables="$(pg_client psql -h 127.0.0.1 -U postgres -d codestra_communication_stage5 -Atqc \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")"
+          restored_tables="$(pg_client psql -h 127.0.0.1 -U postgres -d "$restore_db" -Atqc \
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")"
+          test "$source_tables" = "$restored_tables"
+          source_messages="$(pg_client psql -h 127.0.0.1 -U postgres -d codestra_communication_stage5 -Atqc \
+            "SELECT count(*) FROM messages")"
+          restored_messages="$(pg_client psql -h 127.0.0.1 -U postgres -d "$restore_db" -Atqc \
+            "SELECT count(*) FROM messages")"
+          test "$source_messages" = "$restored_messages"
+          echo "COMMUNICATION_ISOLATED_BACKUP_RESTORE=PASS"
