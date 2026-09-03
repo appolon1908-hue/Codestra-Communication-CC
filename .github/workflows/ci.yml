@@ -102,14 +102,17 @@ jobs:
           pg_client createdb -h 127.0.0.1 -U postgres "$restore_db"
           pg_client pg_restore -h 127.0.0.1 -U postgres -d "$restore_db" \
             --no-owner --no-privileges --exit-on-error /restore/communication.dump
+          schema_query="SELECT 'column', table_name, column_name, ordinal_position::text, data_type, is_nullable, coalesce(column_default, '') FROM information_schema.columns WHERE table_schema='public' UNION ALL SELECT 'constraint', c.relname, x.conname, '', x.contype::text, '', pg_get_constraintdef(x.oid) FROM pg_constraint x JOIN pg_class c ON c.oid=x.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' UNION ALL SELECT 'index', t.relname, i.relname, '', '', '', pg_get_indexdef(i.oid) FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' ORDER BY 1,2,3,4"
+          pg_client psql -h 127.0.0.1 -U postgres -d codestra_communication_stage5 \
+            --no-align --tuples-only --field-separator='|' --command="$schema_query" > "$backup_dir/source-schema.txt"
+          pg_client psql -h 127.0.0.1 -U postgres -d "$restore_db" \
+            --no-align --tuples-only --field-separator='|' --command="$schema_query" > "$restore_dir/restored-schema.txt"
+          diff -u "$backup_dir/source-schema.txt" "$restore_dir/restored-schema.txt"
           pg_client pg_dump -h 127.0.0.1 -U postgres -d codestra_communication_stage5 \
-            --schema-only --no-owner --no-privileges --file=/backup/source-schema.sql
+            --data-only --no-owner --no-privileges --restrict-key=codestra-communication-restore \
+            --file=/backup/source-data.sql
           pg_client pg_dump -h 127.0.0.1 -U postgres -d "$restore_db" \
-            --schema-only --no-owner --no-privileges --file=/restore/restored-schema.sql
-          diff -u "$backup_dir/source-schema.sql" "$restore_dir/restored-schema.sql"
-          pg_client pg_dump -h 127.0.0.1 -U postgres -d codestra_communication_stage5 \
-            --data-only --no-owner --no-privileges --file=/backup/source-data.sql
-          pg_client pg_dump -h 127.0.0.1 -U postgres -d "$restore_db" \
-            --data-only --no-owner --no-privileges --file=/restore/restored-data.sql
+            --data-only --no-owner --no-privileges --restrict-key=codestra-communication-restore \
+            --file=/restore/restored-data.sql
           diff -u "$backup_dir/source-data.sql" "$restore_dir/restored-data.sql"
           echo "COMMUNICATION_ISOLATED_BACKUP_RESTORE=PASS"
