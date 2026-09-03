@@ -11,6 +11,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .metrics import MIDDLEWARE_CIRCUIT_OPEN, MIDDLEWARE_REQUESTS
+from .telemetry import extract as trace_extract, inject as trace_inject, tracer
 
 
 class MiddlewareDeliveryError(RuntimeError):
@@ -124,14 +125,21 @@ class MiddlewareCommunicationClient:
             "X-Correlation-ID": str(payload["correlation_id"]),
             "Idempotency-Key": str(payload["operation_id"]),
         }
+        parent_headers = {
+            key: str(payload[key]) for key in ("traceparent", "tracestate") if payload.get(key)
+        }
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.request(
-                    method,
-                    f"{self._origin()}{path}",
-                    headers=headers,
-                    json=payload if method == "POST" else None,
-                )
+            with tracer().start_as_current_span(
+                "middleware.communication", context=trace_extract(parent_headers),
+                attributes={"http.request.method": method, "server.address": urlsplit(self._origin()).hostname or "unknown"},
+            ) as span:
+                trace_inject(headers)
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.request(
+                        method, f"{self._origin()}{path}", headers=headers,
+                        json=payload if method == "POST" else None,
+                    )
+                span.set_attribute("http.response.status_code", response.status_code)
         except httpx.TransportError as exc:
             self._failure()
             MIDDLEWARE_REQUESTS.labels(outcome="transport_error").inc()

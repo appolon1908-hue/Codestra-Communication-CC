@@ -41,6 +41,19 @@ async def test_operational_headers_and_content_type():
 
 
 @pytest.mark.asyncio
+async def test_w3c_trace_context_is_accepted_without_reflecting_arbitrary_headers():
+    trace_id = "0123456789abcdef0123456789abcdef"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/health",
+            headers={"traceparent": f"00-{trace_id}-0123456789abcdef-01", "tracestate": "vendor=value"},
+        )
+    assert response.status_code == 200
+    assert response.headers["x-trace-id"] == trace_id
+    assert "tracestate" not in response.headers
+
+
+@pytest.mark.asyncio
 async def test_mutations_require_a_bounded_correlation_identity_before_auth():
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         missing = await client.post("/v1/communications/preferences", json={})

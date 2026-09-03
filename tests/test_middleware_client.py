@@ -20,6 +20,7 @@ async def test_middleware_circuit_opens_and_recovers_without_dispatching(monkeyp
 
     class Transport:
         calls = 0
+        last_headers = {}
 
         async def __aenter__(self):
             return self
@@ -29,6 +30,7 @@ async def test_middleware_circuit_opens_and_recovers_without_dispatching(monkeyp
 
         async def request(self, *_args, **_kwargs):
             self.calls += 1
+            self.last_headers = _kwargs["headers"]
             if self.calls <= 2:
                 raise httpx.ConnectError("synthetic unavailable")
             return httpx.Response(202, json={"operation_id": "middleware-op", "state": "accepted"})
@@ -39,6 +41,7 @@ async def test_middleware_circuit_opens_and_recovers_without_dispatching(monkeyp
     payload = {
         "operation_id": "local-op", "tenant_id": "tenant-test",
         "correlation_id": "correlation-test", "channel": "email",
+        "traceparent": "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01",
     }
     for _ in range(2):
         with pytest.raises(MiddlewareDeliveryError, match="middleware_outcome_unknown"):
@@ -51,6 +54,18 @@ async def test_middleware_circuit_opens_and_recovers_without_dispatching(monkeyp
     result = await client.dispatch(payload)
     assert result.operation_id == "middleware-op"
     assert transport.calls == 3
+    assert transport.last_headers["traceparent"].split("-")[1] == "0123456789abcdef0123456789abcdef"
+
+
+def test_enabled_telemetry_rejects_unsafe_collector_endpoints(monkeypatch):
+    from app.telemetry import _endpoint
+
+    for value in ("", "http://collector.internal/v1/traces", "https://user:pass@collector/v1/traces", "https://collector/v1/traces?token=secret"):
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", value)
+        with pytest.raises(ValueError, match="telemetry_endpoint_invalid"):
+            _endpoint()
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.internal/v1/traces")
+    assert _endpoint() == "https://collector.internal/v1/traces"
 
 
 def test_middleware_token_rejects_relative_symlink_and_broad_permissions(monkeypatch, tmp_path):

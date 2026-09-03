@@ -43,6 +43,7 @@ from .events import record_message_event
 from .domain_verifier import DomainVerificationUnavailable, verify_domain_dns
 from .data_protection import DataProtectionError, blind_index, protect, readiness as data_protection_readiness, reveal
 from .metrics import DELIVERY_OUTBOX, HTTP_DURATION, HTTP_REQUESTS, OPERATIONS, PROVIDER_INBOX, render
+from .telemetry import configure as telemetry_readiness, current_trace_headers, current_trace_id, extract as trace_extract, tracer
 
 app = FastAPI(title="Codestra Communication API", version="0.3.0")
 EXTERNAL_DELIVERY_ENABLED = os.getenv("EXTERNAL_DELIVERY_ENABLED", "false").lower() == "true"
@@ -79,10 +80,20 @@ async def operational_headers(request: Request, call_next):
             status_code=400,
             content={"detail": "correlation_id_required", "correlation_id": correlation_id},
         ))
-    try:
-        response = await call_next(request)
-    except Exception:
-        response = JSONResponse(status_code=500, content={"detail": "internal_error", "correlation_id": correlation_id})
+    parent = trace_extract({key.lower(): value for key, value in request.headers.items()})
+    with tracer().start_as_current_span(
+        "http.request", context=parent,
+        attributes={"http.request.method": request.method, "server.address": request.url.hostname or "unknown"},
+    ) as span:
+        try:
+            response = await call_next(request)
+        except Exception:
+            response = JSONResponse(status_code=500, content={"detail": "internal_error", "correlation_id": correlation_id})
+        span.set_attribute("http.response.status_code", response.status_code)
+        span.set_attribute("codestra.correlation_id", correlation_id)
+        trace_id = current_trace_id()
+        if trace_id:
+            response.headers["X-Trace-ID"] = trace_id
     return finalize(response)
 
 TenantHeader = Annotated[str, Header(alias="X-Tenant-ID", min_length=1, max_length=128)]
@@ -570,7 +581,10 @@ async def ready(request: Request, session: AsyncSession = Depends(get_session)):
                 "correlation_id": request.state.correlation_id,
             },
         )
-    return {"status": "ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready", "data_protection": "ready"}, "correlation_id": request.state.correlation_id}
+    telemetry_ready, telemetry_reason = telemetry_readiness()
+    if not telemetry_ready:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready", "data_protection": "ready", "telemetry": telemetry_reason}, "correlation_id": request.state.correlation_id})
+    return {"status": "ready", "service": SERVICE, "dependencies": {"database": "ready", "configuration": "ready", "data_protection": "ready", "telemetry": telemetry_reason}, "correlation_id": request.state.correlation_id}
 
 
 @app.get("/metrics", dependencies=[Depends(require_scope("metrics.read"))])
@@ -630,6 +644,7 @@ def capabilities(request: Request = None) -> dict[str, object]:
         "suppression_enforcement": True,
         "data_protection_configured": protected_ready,
         "external_delivery": EXTERNAL_DELIVERY_ENABLED,
+        "telemetry_export_enabled": os.getenv("TELEMETRY_EXPORT_ENABLED", "false").lower() == "true",
         "correlation_id": correlation_id,
     }
 
@@ -747,6 +762,7 @@ async def create_message(
                             "purpose": row.purpose,
                             "tenant_id": tenant_id,
                             "correlation_id": _correlation(request),
+                            **current_trace_headers(),
                         },
                         sort_keys=True,
                         separators=(",", ":"),
@@ -979,6 +995,7 @@ async def reconcile_operation(
                     "message_id": str(message.id),
                     "tenant_id": x_tenant_id,
                     "correlation_id": operation.correlation_id,
+                    **current_trace_headers(),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1107,6 +1124,7 @@ async def cancel_message(
                         "reason": body.reason,
                         "tenant_id": x_tenant_id,
                         "correlation_id": _correlation(request),
+                        **current_trace_headers(),
                     },
                     sort_keys=True,
                     separators=(",", ":"),

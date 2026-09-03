@@ -46,7 +46,7 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
   response schemas have a canonical authority; only a path is currently documented.
 - Reconcile the remaining SDK naming/schema differences and add exact cross-repo
   OpenAPI compatibility validation.
-- Add traces, production encrypted/off-host backup and restore proof, staging
+- Deploy and verify the implemented opt-in OTLP traces; add production encrypted/off-host backup and restore proof, staging
   certification, immutable release publication, and exact-digest deployment evidence.
 
 ## Safety baseline
@@ -55,6 +55,7 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
 BUSINESS_WRITES_ENABLED=false
 EXTERNAL_DELIVERY_ENABLED=false
 TELEMETRY_EXPORT_ENABLED=false
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://approved-private-collector.example/v1/traces
 RUNTIME_DEPLOYED=false
 PRODUCTION_CHANGED=false
 EMAILS_SENT=0
