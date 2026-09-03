@@ -23,6 +23,12 @@ jobs:
       - run: python -m compileall -q app scripts tests
       - run: pytest -q -m 'not postgres'
       - run: python scripts/validate_openapi_parity.py
+      - name: Validate Prometheus alert rules
+        run: >-
+          docker run --rm --entrypoint=/bin/promtool
+          -v "$PWD/observability:/rules:ro"
+          prom/prometheus@sha256:3c42b892cf723fa54d2f262c37a0e1f80aa8c8ddb1da7b9b0df9455a35a7f893
+          check rules /rules/communication-alerts.yaml
       - run: python -c "from app.main import app, EXTERNAL_DELIVERY_ENABLED; assert app; assert EXTERNAL_DELIVERY_ENABLED is False"
 
   postgres-certification:
