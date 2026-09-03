@@ -227,6 +227,11 @@ async def test_message_event_and_publish_intent_are_atomic_sanitized_and_attempt
         assert recipient not in row.payload_json
         assert "event.test" not in row.payload_json
         assert row.state == "pending"
+        # This database is shared by the module's PostgreSQL tests. Make the
+        # event under test the oldest eligible row so claim(1) proves its
+        # fencing behavior without depending on unrelated pending events.
+        row.created_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        await session.commit()
     claimed = await claim(1, 30, session_factory=sessions)
     assert claimed
     event = next(item for item in claimed if str(created.id) in item.payload_json)

@@ -115,6 +115,9 @@ class Channel(StrEnum):
     PUSH = "push"
 
 
+DELIVERY_CHANNELS = frozenset({Channel.EMAIL, Channel.SMS})
+
+
 class Purpose(StrEnum):
     MARKETING = "marketing"
     TRANSACTIONAL = "transactional"
@@ -414,6 +417,45 @@ def _protected_match(hash_column, legacy_column, value_hash: str, legacy_value: 
     return hash_column == value_hash
 
 
+def _recipient_policy_lock_key(tenant_id: str, channel: str, recipient_hash: str) -> int:
+    digest = hashlib.sha256(
+        b"codestra-communication-policy\x00"
+        + tenant_id.encode("utf-8")
+        + b"\x00"
+        + channel.encode("utf-8")
+        + b"\x00"
+        + recipient_hash.encode("ascii")
+    ).digest()[:8]
+    return int.from_bytes(digest, "big", signed=True)
+
+
+async def _lock_recipient_policy(
+    session: AsyncSession, tenant_id: str, channel: str, recipient_hash: str
+) -> None:
+    await session.execute(
+        select(func.pg_advisory_xact_lock(
+            _recipient_policy_lock_key(tenant_id, channel, recipient_hash)
+        ))
+    )
+
+
+async def _require_current_replay_result(
+    session: AsyncSession, *, tenant_id: str, kind: str,
+    idempotency_key: str, current_version: int,
+) -> None:
+    prior = await session.scalar(
+        select(DomainMutationModel).where(
+            DomainMutationModel.tenant_id == tenant_id,
+            DomainMutationModel.mutation_type == kind,
+            DomainMutationModel.idempotency_key == idempotency_key,
+        )
+    )
+    if prior is None:
+        raise HTTPException(status_code=409, detail="idempotency_replay_missing")
+    if prior.result_version != current_version:
+        raise HTTPException(status_code=409, detail="idempotency_result_superseded")
+
+
 def _actor(request: Request | None) -> str:
     principal = getattr(getattr(request, "state", None), "principal", None)
     return getattr(principal, "subject", "codestra-communication-internal")[:160]
@@ -638,8 +680,9 @@ def capabilities(request: Request = None) -> dict[str, object]:
         "supported_api_versions": ["v1"],
         "email": True,
         "sms": True,
-        "whatsapp": True,
-        "push": True,
+        "whatsapp": False,
+        "push": False,
+        "delivery_channels": sorted(channel.value for channel in DELIVERY_CHANNELS),
         "consent_enforcement": True,
         "suppression_enforcement": True,
         "data_protection_configured": protected_ready,
@@ -669,6 +712,8 @@ async def create_message(
     recipient = _recipient(body.recipient, body.channel)
     if not recipient:
         raise HTTPException(status_code=400, detail="recipient_invalid")
+    if EXTERNAL_DELIVERY_ENABLED and body.channel not in DELIVERY_CHANNELS:
+        raise HTTPException(status_code=422, detail="channel_delivery_not_supported")
     fingerprint = _fingerprint(tenant_id, body, recipient)
     recipient_ciphertext, recipient_hash = _protect_value(
         recipient, tenant_id=tenant_id, purpose="message-recipient"
@@ -679,6 +724,9 @@ async def create_message(
     consent_hash = _protect_value(
         recipient, tenant_id=tenant_id, purpose="consent-subject"
     )[1]
+    await _lock_recipient_policy(
+        session, tenant_id, body.channel.value, suppression_hash
+    )
 
     existing = await session.execute(
         select(MessageModel).where(
@@ -1463,6 +1511,10 @@ async def grant_consent(
         idempotency_key=idempotency_key, payload=payload, result_version=version,
     ):
         assert row is not None
+        await _require_current_replay_result(
+            session, tenant_id=x_tenant_id, kind="consent.grant",
+            idempotency_key=idempotency_key, current_version=row.resource_version,
+        )
         return _consent_response(row)
     if row is None:
         row = ConsentModel(
@@ -1585,6 +1637,10 @@ async def revoke_consent(
         aggregate_key=f"{body.channel.value}:{subject}", kind="consent.revoke",
         idempotency_key=idempotency_key, payload=payload, result_version=row.resource_version + 1,
     ):
+        await _require_current_replay_result(
+            session, tenant_id=x_tenant_id, kind="consent.revoke",
+            idempotency_key=idempotency_key, current_version=row.resource_version,
+        )
         return _consent_response(row)
     if body.expected_version is None or row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
@@ -1733,6 +1789,10 @@ async def upsert_preference(
             ))
         if row is None:
             raise HTTPException(status_code=409, detail="preference_replay_missing")
+        await _require_current_replay_result(
+            session, tenant_id=x_tenant_id, kind="preference.upsert",
+            idempotency_key=idempotency_key, current_version=row.resource_version,
+        )
         return _preference_response(row)
     if row is None:
         if body.expected_version is not None:
@@ -2081,6 +2141,10 @@ async def update_sender_identity(
         aggregate_key=str(sender_identity_id), kind="sender.update",
         idempotency_key=idempotency_key, payload=payload, result_version=row.resource_version + 1,
     ):
+        await _require_current_replay_result(
+            session, tenant_id=x_tenant_id, kind="sender.update",
+            idempotency_key=idempotency_key, current_version=row.resource_version,
+        )
         return _sender_response(row)
     if body.expected_version is None or row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
@@ -2115,6 +2179,9 @@ async def create_suppression(
     recipient_ciphertext, recipient_hash = _protect_value(
         recipient, tenant_id=x_tenant_id, purpose="suppression-recipient"
     )
+    await _lock_recipient_policy(
+        session, x_tenant_id, body.channel.value, recipient_hash
+    )
     row = await session.scalar(
         select(SuppressionModel)
         .where(
@@ -2135,6 +2202,10 @@ async def create_suppression(
         idempotency_key=idempotency_key, payload=payload, result_version=version,
     ):
         assert row is not None
+        await _require_current_replay_result(
+            session, tenant_id=x_tenant_id, kind="suppression.create",
+            idempotency_key=idempotency_key, current_version=row.resource_version,
+        )
         return _suppression_response(row)
     if row is None:
         row = SuppressionModel(
@@ -2229,6 +2300,24 @@ async def delete_suppression(
     request: Request = None,
 ) -> Suppression:
     _require_business_writes()
+    snapshot = await session.scalar(
+        select(SuppressionModel).where(
+            SuppressionModel.id == suppression_id,
+            SuppressionModel.tenant_id == x_tenant_id,
+        )
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="suppression_not_found")
+    recipient = _reveal_value(
+        snapshot.recipient_ciphertext, snapshot.recipient,
+        tenant_id=snapshot.tenant_id, purpose="suppression-recipient",
+    )
+    recipient_hash = _protect_value(
+        recipient, tenant_id=x_tenant_id, purpose="suppression-recipient"
+    )[1]
+    await _lock_recipient_policy(
+        session, x_tenant_id, snapshot.channel, recipient_hash
+    )
     row = await session.scalar(
         select(SuppressionModel)
         .where(SuppressionModel.id == suppression_id, SuppressionModel.tenant_id == x_tenant_id)
@@ -2242,6 +2331,10 @@ async def delete_suppression(
         kind="suppression.delete", idempotency_key=idempotency_key, payload=payload,
         result_version=row.resource_version + 1,
     ):
+        await _require_current_replay_result(
+            session, tenant_id=x_tenant_id, kind="suppression.delete",
+            idempotency_key=idempotency_key, current_version=row.resource_version,
+        )
         return _suppression_response(row)
     if row.resource_version != expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
@@ -2278,18 +2371,24 @@ def _webhook_secret(provider: str) -> bytes:
     dependencies=[Depends(require_scope("communications.providers.read"))],
 )
 def provider_statuses() -> list[ProviderStatus]:
-    state = "middleware_routed" if EXTERNAL_DELIVERY_ENABLED else "delivery_disabled"
-    health = "not_probed" if EXTERNAL_DELIVERY_ENABLED else "disabled"
-    return [
-        ProviderStatus(
-            channel=channel,
-            route="middleware",
-            state=state,
-            health=health,
-            reputation="not_applicable" if not EXTERNAL_DELIVERY_ENABLED else "not_probed",
-        )
-        for channel in Channel
-    ]
+    result: list[ProviderStatus] = []
+    for channel in Channel:
+        if not EXTERNAL_DELIVERY_ENABLED:
+            result.append(ProviderStatus(
+                channel=channel, route="middleware", state="delivery_disabled",
+                health="disabled", reputation="not_applicable",
+            ))
+        elif channel in DELIVERY_CHANNELS:
+            result.append(ProviderStatus(
+                channel=channel, route="middleware", state="middleware_routed",
+                health="not_probed", reputation="not_probed",
+            ))
+        else:
+            result.append(ProviderStatus(
+                channel=channel, route="none", state="unsupported",
+                health="not_applicable", reputation="not_applicable",
+            ))
+    return result
 
 
 @router.get(
@@ -2298,13 +2397,30 @@ def provider_statuses() -> list[ProviderStatus]:
     dependencies=[Depends(require_scope("communications.providers.read"))],
 )
 def provider_health() -> ProviderHealth:
-    status = "disabled" if not EXTERNAL_DELIVERY_ENABLED else "degraded"
-    reason = "external_delivery_disabled" if not EXTERNAL_DELIVERY_ENABLED else "runtime_probe_not_configured"
+    if not EXTERNAL_DELIVERY_ENABLED:
+        return ProviderHealth(
+            status="disabled", checked_at=datetime.now(timezone.utc),
+            providers=[
+                ProviderHealthItem(
+                    provider="middleware", channel=channel, status="disabled",
+                    reason="external_delivery_disabled",
+                )
+                for channel in Channel
+            ],
+        )
     return ProviderHealth(
-        status=status,
-        checked_at=datetime.now(timezone.utc),
+        status="degraded", checked_at=datetime.now(timezone.utc),
         providers=[
-            ProviderHealthItem(provider="middleware", channel=channel, status=status, reason=reason)
+            ProviderHealthItem(
+                provider="middleware" if channel in DELIVERY_CHANNELS else "none",
+                channel=channel,
+                status="degraded" if channel in DELIVERY_CHANNELS else "unsupported",
+                reason=(
+                    "runtime_probe_not_configured"
+                    if channel in DELIVERY_CHANNELS
+                    else "channel_delivery_not_supported"
+                ),
+            )
             for channel in Channel
         ],
     )
