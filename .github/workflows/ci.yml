@@ -109,10 +109,10 @@ jobs:
             --no-align --tuples-only --field-separator='|' --command="$schema_query" > "$restore_dir/restored-schema.txt"
           diff -u "$backup_dir/source-schema.txt" "$restore_dir/restored-schema.txt"
           pg_client pg_dump -h 127.0.0.1 -U postgres -d codestra_communication_stage5 \
-            --data-only --no-owner --no-privileges --restrict-key=codestra-communication-restore \
+            --data-only --no-owner --no-privileges --restrict-key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
             --file=/backup/source-data.sql
           pg_client pg_dump -h 127.0.0.1 -U postgres -d "$restore_db" \
-            --data-only --no-owner --no-privileges --restrict-key=codestra-communication-restore \
+            --data-only --no-owner --no-privileges --restrict-key=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
             --file=/restore/restored-data.sql
           diff -u "$backup_dir/source-data.sql" "$restore_dir/restored-data.sql"
           echo "COMMUNICATION_ISOLATED_BACKUP_RESTORE=PASS"
