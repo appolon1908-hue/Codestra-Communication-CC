@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import httpx
+
+from .metrics import MIDDLEWARE_CIRCUIT_OPEN, MIDDLEWARE_REQUESTS
 
 
 class MiddlewareDeliveryError(RuntimeError):
@@ -28,6 +31,32 @@ class MiddlewareCommunicationClient:
         self.base_url = os.getenv("MIDDLEWARE_BASE_URL", "").rstrip("/")
         self.token_file = os.getenv("MIDDLEWARE_TOKEN_FILE", "")
         self.timeout = max(1.0, min(float(os.getenv("MIDDLEWARE_TIMEOUT_SECONDS", "10")), 60.0))
+        self.failure_threshold = max(
+            1, min(int(os.getenv("MIDDLEWARE_CIRCUIT_FAILURE_THRESHOLD", "5")), 20)
+        )
+        self.recovery_seconds = max(
+            1.0, min(float(os.getenv("MIDDLEWARE_CIRCUIT_RECOVERY_SECONDS", "30")), 300.0)
+        )
+        self._consecutive_failures = 0
+        self._open_until = 0.0
+
+    def _before_request(self) -> None:
+        if self._open_until > time.monotonic():
+            MIDDLEWARE_CIRCUIT_OPEN.set(1)
+            MIDDLEWARE_REQUESTS.labels(outcome="circuit_open").inc()
+            raise MiddlewareDeliveryError("middleware_circuit_open", retryable=True)
+        MIDDLEWARE_CIRCUIT_OPEN.set(0)
+
+    def _success(self) -> None:
+        self._consecutive_failures = 0
+        self._open_until = 0.0
+        MIDDLEWARE_CIRCUIT_OPEN.set(0)
+
+    def _failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.failure_threshold:
+            self._open_until = time.monotonic() + self.recovery_seconds
+            MIDDLEWARE_CIRCUIT_OPEN.set(1)
 
     def _origin(self) -> str:
         parsed = urlsplit(self.base_url)
@@ -53,6 +82,7 @@ class MiddlewareCommunicationClient:
         return token
 
     async def dispatch(self, payload: dict[str, Any]) -> MiddlewareResult:
+        self._before_request()
         action = str(payload.get("action", "deliver"))
         if action == "reconcile":
             path = f"/api/v1/operations/{quote(str(payload['middleware_operation_id']), safe='')}"
@@ -81,11 +111,18 @@ class MiddlewareCommunicationClient:
                     json=payload if method == "POST" else None,
                 )
         except httpx.TransportError as exc:
+            self._failure()
+            MIDDLEWARE_REQUESTS.labels(outcome="transport_error").inc()
             raise MiddlewareDeliveryError(
                 "middleware_outcome_unknown", retryable=True, outcome_unknown=True
             ) from exc
         if response.status_code not in {200, 202}:
             transient = response.status_code in {408, 425, 429} or response.status_code >= 500
+            if transient:
+                self._failure()
+            else:
+                self._success()
+            MIDDLEWARE_REQUESTS.labels(outcome="rejected").inc()
             raise MiddlewareDeliveryError(
                 f"middleware_rejected_{response.status_code}", retryable=transient,
                 outcome_unknown=response.status_code >= 500,
@@ -97,7 +134,11 @@ class MiddlewareCommunicationClient:
             if not operation_id or len(operation_id) > 128 or not state or len(state) > 32:
                 raise ValueError("response identity outside storage bounds")
         except (KeyError, TypeError, ValueError) as exc:
+            self._failure()
+            MIDDLEWARE_REQUESTS.labels(outcome="invalid_response").inc()
             raise MiddlewareDeliveryError(
                 "middleware_response_invalid", retryable=True, outcome_unknown=True
             ) from exc
+        self._success()
+        MIDDLEWARE_REQUESTS.labels(outcome="accepted").inc()
         return MiddlewareResult(operation_id, state)

@@ -45,7 +45,7 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
   response schemas have a canonical authority; only a path is currently documented.
 - Reconcile the remaining SDK naming/schema differences and add exact cross-repo
   OpenAPI compatibility validation.
-- Add traces, circuit-breaker evidence, alerts, backup/restore proof, staging
+- Add traces, alerts, backup/restore proof, staging
   certification, immutable release publication, and exact-digest deployment evidence.
 
 ## Safety baseline

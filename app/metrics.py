@@ -37,6 +37,15 @@ EVENT_PUBLICATIONS = Counter(
     "Integration event publication outcomes.",
     ("outcome",),
 )
+MIDDLEWARE_REQUESTS = Counter(
+    "codestra_communication_middleware_requests_total",
+    "Middleware command outcomes using bounded labels.",
+    ("outcome",),
+)
+MIDDLEWARE_CIRCUIT_OPEN = Gauge(
+    "codestra_communication_middleware_circuit_open",
+    "Whether the Middleware dependency circuit is currently open.",
+)
 
 
 def render() -> tuple[bytes, str]:
