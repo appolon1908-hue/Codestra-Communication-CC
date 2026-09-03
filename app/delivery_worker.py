@@ -88,6 +88,32 @@ async def claim_one(lease_seconds: int, *, session_factory=SessionLocal) -> Clai
             row.last_error_code = "data_protection_unavailable"
             operation.state = "failed"
             operation.error_code = "data_protection_unavailable"
+            message = await session.scalar(
+                select(MessageModel)
+                .where(
+                    MessageModel.id == operation.message_id,
+                    MessageModel.tenant_id == operation.tenant_id,
+                )
+                .with_for_update()
+            )
+            if message is not None:
+                previous = message.status
+                message.status = "delivery_failed"
+                if previous != message.status:
+                    message.resource_version += 1
+                event_type = "communication.message.delivery_failed"
+                await record_message_event(
+                    session, message, event_type=event_type, previous_status=previous,
+                    actor_id="communication-delivery-worker",
+                    correlation_id=operation.correlation_id,
+                    safe_detail="data_protection_unavailable",
+                )
+                session.add(CommunicationAuditModel(
+                    tenant_id=message.tenant_id, aggregate_type="message",
+                    aggregate_id=message.id, action=event_type, outcome="failed",
+                    actor_id="communication-delivery-worker",
+                    correlation_id=operation.correlation_id,
+                ))
             await session.commit()
             return None
         operation.attempts = row.attempts

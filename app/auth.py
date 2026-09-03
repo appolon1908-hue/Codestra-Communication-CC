@@ -28,6 +28,13 @@ service_bearer = OAuth2(
                 "communications.providers.read": "Read provider routing and health state",
                 "communications.operations.read": "Read durable communication operations",
                 "communications.operations.reconcile": "Reconcile uncertain communication operations",
+                "communications.preferences.read": "Read recipient communication preferences",
+                "communications.preferences.write": "Manage recipient communication preferences",
+                "communications.domains.read": "Read sending-domain state",
+                "communications.domains.write": "Manage and verify sending domains",
+                "communications.senders.read": "Read sender identities",
+                "communications.senders.write": "Manage sender identities",
+                "communications.usage.read": "Read tenant-scoped communication usage",
                 "metrics.read": "Read private service metrics",
             },
         )

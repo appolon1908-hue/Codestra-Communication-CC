@@ -33,6 +33,22 @@ def _endpoint() -> str:
     return value
 
 
+def _trusted_parent_chain(path: Path) -> None:
+    current = path.parent
+    while True:
+        try:
+            details = current.lstat()
+        except OSError as exc:
+            raise ValueError("telemetry_file_invalid") from exc
+        if current.is_symlink() or not stat.S_ISDIR(details.st_mode):
+            raise ValueError("telemetry_file_invalid")
+        if details.st_uid not in {0, os.geteuid()} or stat.S_IMODE(details.st_mode) & 0o022:
+            raise ValueError("telemetry_file_invalid")
+        if current.parent == current:
+            return
+        current = current.parent
+
+
 def _optional_file(name: str, *, private: bool) -> str | None:
     value = os.getenv(name, "").strip()
     if not value:
@@ -40,13 +56,31 @@ def _optional_file(name: str, *, private: bool) -> str | None:
     path = Path(value)
     if not path.is_absolute():
         raise ValueError("telemetry_file_invalid")
+    _trusted_parent_chain(path)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        details = path.lstat()
+        descriptor = os.open(path, flags)
     except OSError as exc:
         raise ValueError("telemetry_file_invalid") from exc
-    if not stat.S_ISREG(details.st_mode) or (private and (
-        details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077
-    )):
+    try:
+        details = os.fstat(descriptor)
+        mode = stat.S_IMODE(details.st_mode)
+        if not stat.S_ISREG(details.st_mode):
+            raise ValueError("telemetry_file_invalid")
+        if details.st_uid not in {0, os.geteuid()} or mode & 0o022:
+            raise ValueError("telemetry_file_invalid")
+        if private and (details.st_uid != os.geteuid() or mode & 0o077):
+            raise ValueError("telemetry_file_invalid")
+        if details.st_size <= 0:
+            raise ValueError("telemetry_file_invalid")
+        identity = (details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns)
+    finally:
+        os.close(descriptor)
+    try:
+        after = path.lstat()
+    except OSError as exc:
+        raise ValueError("telemetry_file_invalid") from exc
+    if path.is_symlink() or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
         raise ValueError("telemetry_file_invalid")
     return str(path)
 
