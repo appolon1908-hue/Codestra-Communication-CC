@@ -58,7 +58,7 @@ async def test_middleware_circuit_opens_and_recovers_without_dispatching(monkeyp
 
 
 def test_enabled_telemetry_rejects_unsafe_collector_endpoints(monkeypatch):
-    from app.telemetry import _endpoint
+    from app.telemetry import _endpoint, _optional_file
 
     for value in ("", "http://collector.internal/v1/traces", "https://user:pass@collector/v1/traces", "https://collector/v1/traces?token=secret"):
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", value)
@@ -66,6 +66,9 @@ def test_enabled_telemetry_rejects_unsafe_collector_endpoints(monkeypatch):
             _endpoint()
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "https://collector.internal/v1/traces")
     assert _endpoint() == "https://collector.internal/v1/traces"
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_CLIENT_KEY", "relative-key")
+    with pytest.raises(ValueError, match="telemetry_file_invalid"):
+        _optional_file("OTEL_EXPORTER_OTLP_CLIENT_KEY", private=True)
 
 
 def test_middleware_token_rejects_relative_symlink_and_broad_permissions(monkeypatch, tmp_path):

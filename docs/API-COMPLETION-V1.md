@@ -56,6 +56,10 @@ BUSINESS_WRITES_ENABLED=false
 EXTERNAL_DELIVERY_ENABLED=false
 TELEMETRY_EXPORT_ENABLED=false
 OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://approved-private-collector.example/v1/traces
+# Optional private collector trust/client authentication; client key must be 0600 and runtime-owned.
+OTEL_EXPORTER_OTLP_CERTIFICATE=/run/secrets/otel-ca.pem
+OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE=/run/secrets/otel-client.crt
+OTEL_EXPORTER_OTLP_CLIENT_KEY=/run/secrets/otel-client.key
 RUNTIME_DEPLOYED=false
 PRODUCTION_CHANGED=false
 EMAILS_SENT=0

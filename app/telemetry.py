@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from opentelemetry import propagate, trace
@@ -31,6 +33,24 @@ def _endpoint() -> str:
     return value
 
 
+def _optional_file(name: str, *, private: bool) -> str | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise ValueError("telemetry_file_invalid")
+    try:
+        details = path.lstat()
+    except OSError as exc:
+        raise ValueError("telemetry_file_invalid") from exc
+    if not stat.S_ISREG(details.st_mode) or (private and (
+        details.st_uid != os.geteuid() or stat.S_IMODE(details.st_mode) & 0o077
+    )):
+        raise ValueError("telemetry_file_invalid")
+    return str(path)
+
+
 def configure() -> tuple[bool, str]:
     global _configured, _configuration_error
     if not enabled():
@@ -43,12 +63,20 @@ def configure() -> tuple[bool, str]:
         if _configured:
             return True, "ready"
         try:
+            certificate = _optional_file("OTEL_EXPORTER_OTLP_CERTIFICATE", private=False)
+            client_key = _optional_file("OTEL_EXPORTER_OTLP_CLIENT_KEY", private=True)
+            client_certificate = _optional_file("OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE", private=False)
+            if (client_key is None) != (client_certificate is None):
+                raise ValueError("telemetry_mtls_incomplete")
             provider = TracerProvider(resource=Resource.create({
                 "service.name": SERVICE,
                 "service.version": os.getenv("CODESTRA_RELEASE_VERSION", "unknown"),
                 "deployment.environment.name": os.getenv("CODESTRA_ENVIRONMENT", "unknown"),
             }))
-            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=_endpoint())))
+            provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(
+                endpoint=_endpoint(), certificate_file=certificate,
+                client_key_file=client_key, client_certificate_file=client_certificate,
+            )))
             trace.set_tracer_provider(provider)
             _configured = True
         except Exception:
