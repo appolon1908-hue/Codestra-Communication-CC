@@ -44,3 +44,6 @@ ALTER TABLE communication_templates DROP CONSTRAINT IF EXISTS ck_communication_t
 ALTER TABLE communication_templates ADD CONSTRAINT ck_communication_template_body_protected
   CHECK (body_template IS NOT NULL OR body_ciphertext IS NOT NULL) NOT VALID;
 ALTER TABLE communication_templates VALIDATE CONSTRAINT ck_communication_template_body_protected;
+
+ALTER TABLE communication_domain_mutations
+  ADD COLUMN IF NOT EXISTS aggregate_key_ciphertext text;

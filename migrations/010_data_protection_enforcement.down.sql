@@ -1,5 +1,7 @@
 ALTER TABLE IF EXISTS communication_delivery_outbox
   DROP CONSTRAINT IF EXISTS ck_communication_delivery_payload_protected;
+ALTER TABLE IF EXISTS communication_domain_mutations
+  DROP CONSTRAINT IF EXISTS ck_communication_mutation_key_protected;
 
 ALTER TABLE IF EXISTS communication_templates DROP CONSTRAINT IF EXISTS ck_communication_template_body_protected;
 ALTER TABLE IF EXISTS communication_templates ADD CONSTRAINT ck_communication_template_body_protected

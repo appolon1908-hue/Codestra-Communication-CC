@@ -474,11 +474,15 @@ async def _record_domain_mutation(
         if prior.request_fingerprint != fingerprint:
             raise HTTPException(status_code=409, detail="idempotency_conflict")
         return False
+    aggregate_ciphertext, aggregate_hash = _protect_value(
+        aggregate_key, tenant_id=tenant_id, purpose="mutation-aggregate-key"
+    )
     session.add(
         DomainMutationModel(
             tenant_id=tenant_id,
             aggregate_type=aggregate_type,
-            aggregate_key=aggregate_key,
+            aggregate_key=aggregate_hash,
+            aggregate_key_ciphertext=aggregate_ciphertext,
             mutation_type=kind,
             idempotency_key=idempotency_key,
             request_fingerprint=fingerprint,
@@ -1860,7 +1864,9 @@ async def verify_domain(
         DomainMutationModel.idempotency_key == idempotency_key,
     ))
     if prior is not None:
-        if prior.aggregate_key != str(domain_id):
+        if prior.aggregate_key != _protect_value(
+            str(domain_id), tenant_id=x_tenant_id, purpose="mutation-aggregate-key"
+        )[1]:
             raise HTTPException(status_code=409, detail="idempotency_conflict")
         replay = await session.scalar(select(SendingDomainModel).where(
             SendingDomainModel.id == domain_id, SendingDomainModel.tenant_id == x_tenant_id))

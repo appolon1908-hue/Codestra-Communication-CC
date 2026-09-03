@@ -35,7 +35,8 @@ async def main() -> None:
             await conn.execute(
                 "LOCK TABLE messages, communication_consents, communication_suppressions, "
                 "communication_preferences, communication_templates, "
-                "communication_delivery_outbox IN ACCESS EXCLUSIVE MODE"
+                "communication_delivery_outbox, communication_domain_mutations "
+                "IN ACCESS EXCLUSIVE MODE"
             )
             specs = (
                 ("messages", "recipient", "recipient_ciphertext", "message-recipient"),
@@ -73,6 +74,20 @@ async def main() -> None:
                 clear = unprotect(row["payload_json"], tenant_id=row["tenant_id"], purpose="delivery-payload")
                 await conn.execute(
                     "UPDATE communication_delivery_outbox SET payload_json=$1 WHERE id=$2", clear, row["id"]
+                )
+            mutations = await conn.fetch(
+                "SELECT id, tenant_id, aggregate_key_ciphertext FROM communication_domain_mutations "
+                "WHERE aggregate_key_ciphertext IS NOT NULL FOR UPDATE"
+            )
+            for row in mutations:
+                clear = unprotect(
+                    row["aggregate_key_ciphertext"], tenant_id=row["tenant_id"],
+                    purpose="mutation-aggregate-key",
+                )
+                await conn.execute(
+                    "UPDATE communication_domain_mutations SET aggregate_key=$1, "
+                    "aggregate_key_ciphertext=NULL WHERE id=$2",
+                    clear, row["id"],
                 )
             await conn.execute(
                 (ROOT / "migrations/009_data_protection_columns.down.sql").read_text()

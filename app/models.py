@@ -271,6 +271,7 @@ class DomainMutationModel(Base):
     tenant_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)
     aggregate_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    aggregate_key_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     mutation_type: Mapped[str] = mapped_column(String(64), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
     request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -57,6 +57,12 @@ async def seed_schema_008(conn: asyncpg.Connection) -> None:
         "INSERT INTO communication_delivery_outbox (tenant_id,operation_id,payload_json) VALUES ('tenant-migration',$1,$2)",
         operation_id, '{"recipient":"migration-person@example.invalid"}',
     )
+    await conn.execute(
+        "INSERT INTO communication_domain_mutations "
+        "(tenant_id,aggregate_type,aggregate_key,mutation_type,idempotency_key,request_fingerprint,result_version) "
+        "VALUES ('tenant-migration','consent',$1,'migration.test','migration-mutation',repeat('0',64),1)",
+        f"email:{MARKER}",
+    )
 
 
 async def assert_protected(conn: asyncpg.Connection) -> None:
@@ -85,6 +91,13 @@ async def assert_protected(conn: asyncpg.Connection) -> None:
         "SELECT payload_json FROM communication_delivery_outbox WHERE tenant_id='tenant-migration'"
     )
     assert payload.startswith("v1:") and MARKER not in payload
+    mutation = await conn.fetchrow(
+        "SELECT aggregate_key,aggregate_key_ciphertext FROM communication_domain_mutations "
+        "WHERE tenant_id='tenant-migration'"
+    )
+    assert len(mutation["aggregate_key"]) == 64
+    assert mutation["aggregate_key_ciphertext"].startswith("v1:")
+    assert MARKER not in mutation["aggregate_key_ciphertext"]
 
 
 async def main() -> None:
@@ -92,6 +105,14 @@ async def main() -> None:
         raise SystemExit("POSTGRES_DSN or DATABASE_URL is required")
     conn = await asyncpg.connect(dsn())
     try:
+        expected_database = os.getenv("COMMUNICATION_CERTIFICATION_DATABASE", "")
+        actual_database = await conn.fetchval("SELECT current_database()")
+        if (
+            os.getenv("COMMUNICATION_DESTRUCTIVE_CERTIFICATION") != "YES"
+            or not expected_database
+            or actual_database != expected_database
+        ):
+            raise SystemExit("isolated certification database confirmation is required")
         await seed_schema_008(conn)
     finally:
         await conn.close()
@@ -108,6 +129,26 @@ async def main() -> None:
         assert await conn.fetchval(
             "SELECT recipient FROM messages WHERE tenant_id='tenant-migration'"
         ) == MARKER
+        assert await conn.fetchval(
+            "SELECT subject_key FROM communication_consents WHERE tenant_id='tenant-migration'"
+        ) == MARKER
+        assert await conn.fetchval(
+            "SELECT recipient FROM communication_suppressions WHERE tenant_id='tenant-migration'"
+        ) == "+15555550123"
+        assert await conn.fetchval(
+            "SELECT subject FROM communication_preferences WHERE tenant_id='tenant-migration'"
+        ) == MARKER
+        template = await conn.fetchrow(
+            "SELECT subject_template,body_template FROM communication_templates "
+            "WHERE tenant_id='tenant-migration'"
+        )
+        assert tuple(template.values()) == ("Private subject", "Private body")
+        assert await conn.fetchval(
+            "SELECT payload_json FROM communication_delivery_outbox WHERE tenant_id='tenant-migration'"
+        ) == '{"recipient":"migration-person@example.invalid"}'
+        assert await conn.fetchval(
+            "SELECT aggregate_key FROM communication_domain_mutations WHERE tenant_id='tenant-migration'"
+        ) == f"email:{MARKER}"
         assert not await conn.fetchval(
             "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='messages' AND column_name='recipient_ciphertext')"
         )
@@ -118,6 +159,7 @@ async def main() -> None:
     try:
         async with conn.transaction():
             for table in (
+                "communication_domain_mutations",
                 "communication_consents", "communication_suppressions",
                 "communication_preferences", "communication_templates", "messages",
             ):

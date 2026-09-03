@@ -50,6 +50,8 @@ jobs:
       COMMUNICATION_ACTIVE_DATA_KEY_ID: key-1
       COMMUNICATION_BLIND_INDEX_KEY_ID: key-1
       COMMUNICATION_ALLOW_LEGACY_PLAINTEXT_READS: 'true'
+      COMMUNICATION_DESTRUCTIVE_CERTIFICATION: 'YES'
+      COMMUNICATION_CERTIFICATION_DATABASE: codestra_communication_stage5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

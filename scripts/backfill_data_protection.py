@@ -56,7 +56,8 @@ async def main() -> None:
             await conn.execute(
                 "LOCK TABLE messages, communication_consents, communication_suppressions, "
                 "communication_preferences, communication_templates, "
-                "communication_delivery_outbox IN ACCESS EXCLUSIVE MODE"
+                "communication_delivery_outbox, communication_domain_mutations "
+                "IN ACCESS EXCLUSIVE MODE"
             )
             counts["messages"] = await _protected_rows(
                 conn, "messages", "recipient", "recipient_ciphertext", "recipient_hash", "message-recipient"
@@ -110,6 +111,25 @@ async def main() -> None:
                     row["id"],
                 )
             counts["delivery_outbox"] = len(outbox)
+            mutations = await conn.fetch(
+                "SELECT id, tenant_id, aggregate_key FROM communication_domain_mutations "
+                "WHERE aggregate_key_ciphertext IS NULL FOR UPDATE"
+            )
+            for row in mutations:
+                await conn.execute(
+                    "UPDATE communication_domain_mutations SET aggregate_key=$1, "
+                    "aggregate_key_ciphertext=$2 WHERE id=$3",
+                    blind_index(
+                        row["aggregate_key"], tenant_id=row["tenant_id"],
+                        purpose="mutation-aggregate-key",
+                    ),
+                    protect(
+                        row["aggregate_key"], tenant_id=row["tenant_id"],
+                        purpose="mutation-aggregate-key",
+                    ),
+                    row["id"],
+                )
+            counts["domain_mutations"] = len(mutations)
             await conn.execute((ROOT / "migrations/010_data_protection_enforcement.sql").read_text())
     finally:
         await conn.close()
