@@ -58,7 +58,15 @@ def _activation_public_state() -> dict[str, object]:
     return state
 
 
-def production_capabilities(request: Request | None = None) -> dict[str, object]:
+def production_capabilities(request: Request = None) -> dict[str, object]:
+    """Return exact effective capability state.
+
+    ``Request`` deliberately remains the FastAPI-recognized parameter type
+    while retaining the default used by source-level tests and operator tools.
+    ``Request | None`` is not a valid dependency field in FastAPI and prevents
+    application startup before any activation gate can run.
+    """
+
     value = dict(_original_capabilities(request))
     activation = _activation_public_state()
     value.update(
