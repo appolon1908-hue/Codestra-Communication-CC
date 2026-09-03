@@ -29,6 +29,7 @@ from app.main import (
     TemplateUpdate,
     TemplateRenderRequest,
     cancel_message,
+    archive_template,
     create_message,
     get_message,
     get_message_events,
@@ -776,6 +777,18 @@ async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe
         with pytest.raises(HTTPException) as hidden:
             await get_template(template_id, other_tenant, session)
         assert hidden.value.status_code == 404
+    async with sessions() as session:
+        response = await archive_template(
+            template_id, tenant_id, "template-archive-key", session
+        )
+        assert response.status_code == 204
+        stored = await session.get(TemplateModel, template_id)
+        assert stored.active is False
+    async with sessions() as session:
+        replay = await archive_template(
+            template_id, tenant_id, "template-archive-key", session
+        )
+        assert replay.status_code == 204
 
     recipient = f"policy-{uuid.uuid4()}@example.invalid"
     grant = ConsentChange(

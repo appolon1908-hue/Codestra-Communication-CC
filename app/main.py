@@ -1294,6 +1294,11 @@ async def render_template(
     response_model=Template,
     dependencies=[Depends(require_scope("communications.templates.write"))],
 )
+@router.put(
+    "/templates/{template_id}",
+    response_model=Template,
+    dependencies=[Depends(require_scope("communications.templates.write"))],
+)
 async def update_template(
     template_id: UUID,
     body: TemplateUpdate,
@@ -1340,6 +1345,44 @@ async def update_template(
     await session.commit()
     await session.refresh(row)
     return _template_response(row)
+
+
+@router.delete(
+    "/templates/{template_id}",
+    status_code=204,
+    dependencies=[Depends(require_scope("communications.templates.write"))],
+)
+async def archive_template(
+    template_id: UUID,
+    x_tenant_id: TenantHeader,
+    idempotency_key: IdempotencyHeader,
+    session: AsyncSession = Depends(get_session),
+    request: Request = None,
+) -> Response:
+    _require_business_writes()
+    row = await session.scalar(
+        select(TemplateModel)
+        .where(TemplateModel.id == template_id, TemplateModel.tenant_id == x_tenant_id)
+        .with_for_update()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="template_not_found")
+    payload = {"template_id": str(template_id), "active": False}
+    if await _record_domain_mutation(
+        session, tenant_id=x_tenant_id, aggregate_type="template",
+        aggregate_key=str(template_id), kind="template.archive",
+        idempotency_key=idempotency_key, payload=payload,
+        result_version=row.resource_version if not row.active else row.resource_version + 1,
+    ):
+        if row.active:
+            row.active = False
+            row.resource_version += 1
+        _audit_domain(
+            session, tenant_id=x_tenant_id, aggregate_type="template", aggregate_id=row.id,
+            action="communication.template.archived", request=request,
+        )
+        await session.commit()
+    return Response(status_code=204)
 
 
 @router.post(
