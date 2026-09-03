@@ -20,7 +20,7 @@ remaining-gaps section is closed and protected exact-head validation passes.
 
 ## Security and durability
 
-All tenant mutations require verified Keycloak issuer, audience, client, scope and tenant claims plus `X-Tenant-ID`, `X-Correlation-ID`, and `Idempotency-Key`. Browser-supplied scope or identity headers are rejected. Marketing messages require consent and every purpose honors suppression. Recipient values are prohibited from metric/log/event labels but are not yet protected at rest; that remains a blocking production gap.
+All tenant mutations require verified Keycloak issuer, audience, client, scope and tenant claims plus `X-Tenant-ID`, `X-Correlation-ID`, and `Idempotency-Key`. Browser-supplied scope or identity headers are rejected. Marketing messages require consent and every purpose honors suppression. Recipient, policy-subject, template-content, and delivery-command values are prohibited from metric/log/event labels and protected at rest using tenant/purpose-bound AEAD.
 
 Enabled email or SMS work is submitted only to the durable Middleware control API. Communication never calls Klyrow, SMTP, Telnexa, Twilio, SIP, WhatsApp, push providers, or any delivery engine directly. Unknown outcomes enter reconciliation before retry.
 
@@ -35,8 +35,6 @@ Enabled email or SMS work is submitted only to the durable Middleware control AP
 
 ## Remaining production gaps
 
-- Protect recipient and rendered communication content at rest with an approved,
-  rotatable workload key supplied through secret injection.
 - Complete provider-side sender/domain verification. Registration and real
   SPF/DKIM/DMARC/BIMI DNS read-back are implemented; reverse-DNS, transport TLS,
   and provider account approval remain `not_configured`, and senders remain

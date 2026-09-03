@@ -64,4 +64,5 @@ jobs:
           openssl rand -out "$COMMUNICATION_DATA_KEY_DIR/$COMMUNICATION_ACTIVE_DATA_KEY_ID.key" 32
           chmod 600 "$COMMUNICATION_DATA_KEY_DIR/$COMMUNICATION_ACTIVE_DATA_KEY_ID.key"
       - run: python scripts/certify_stage5_postgres.py
+      - run: python scripts/certify_data_protection_migration.py
       - run: pytest -q -m postgres
