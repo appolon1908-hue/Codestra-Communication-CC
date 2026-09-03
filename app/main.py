@@ -1325,6 +1325,13 @@ async def update_template(
         kind="template.update", idempotency_key=idempotency_key, payload=payload,
         result_version=row.resource_version + 1,
     ):
+        prior = await session.scalar(select(DomainMutationModel).where(
+            DomainMutationModel.tenant_id == x_tenant_id,
+            DomainMutationModel.mutation_type == "template.update",
+            DomainMutationModel.idempotency_key == idempotency_key,
+        ))
+        if prior is None or prior.result_version != row.resource_version:
+            raise HTTPException(status_code=409, detail="idempotency_result_superseded")
         return _template_response(row)
     if row.resource_version != body.expected_version:
         raise HTTPException(status_code=409, detail="stale_resource_version")
@@ -1385,7 +1392,20 @@ async def archive_template(
             session, tenant_id=x_tenant_id, aggregate_type="template", aggregate_id=row.id,
             action="communication.template.archived", request=request,
         )
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            winner = await session.scalar(select(DomainMutationModel).where(
+                DomainMutationModel.tenant_id == x_tenant_id,
+                DomainMutationModel.mutation_type == "template.archive",
+                DomainMutationModel.idempotency_key == idempotency_key,
+            ))
+            expected = _domain_fingerprint(
+                "template.archive", str(template_id), payload
+            )
+            if winner is None or winner.request_fingerprint != expected:
+                raise HTTPException(status_code=409, detail="idempotency_conflict") from exc
     return Response(status_code=204)
 
 

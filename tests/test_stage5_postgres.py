@@ -789,6 +789,26 @@ async def test_templates_consents_and_suppressions_are_versioned_and_replay_safe
             template_id, tenant_id, "template-archive-key", session
         )
         assert replay.status_code == 204
+    async with sessions() as session:
+        changed = await update_template(
+            template_id,
+            TemplateUpdate(expected_version=template_version + 2, body_template="Later"),
+            tenant_id, "template-later-update-key", session,
+        )
+        assert changed.resource_version == template_version + 3
+    async with sessions() as session:
+        with pytest.raises(HTTPException) as superseded:
+            await update_template(
+                template_id,
+                TemplateUpdate(
+                    expected_version=template_version,
+                    subject_template=None,
+                    body_template="Hello",
+                ),
+                tenant_id, "template-update-key", session,
+            )
+        assert superseded.value.status_code == 409
+        assert superseded.value.detail == "idempotency_result_superseded"
 
     recipient = f"policy-{uuid.uuid4()}@example.invalid"
     grant = ConsentChange(
