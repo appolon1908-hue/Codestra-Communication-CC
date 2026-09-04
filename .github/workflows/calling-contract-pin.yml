@@ -1,21 +1,44 @@
 name: calling-contract-pin
+
 on:
   pull_request:
-    paths: [".codestra/calling-contract.lock.json"]
+    paths:
+      - ".codestra/calling-contract.lock.json"
+      - ".github/workflows/calling-contract-pin.yml"
   push:
     branches: ["main"]
-    paths: [".codestra/calling-contract.lock.json"]
+    paths:
+      - ".codestra/calling-contract.lock.json"
+      - ".github/workflows/calling-contract-pin.yml"
+
 permissions:
   contents: read
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check out exact triggering source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 1
           persist-credentials: false
-      - name: Enforce issue 257 contract and fail-closed default
+
+      - name: Prove exact source identity
         run: |
-          test "$(jq -r .version .codestra/calling-contract.lock.json)" = "1.0.0"
-          test "$(jq -r .sha256 .codestra/calling-contract.lock.json)" = "b39cdffe56a8185c91174228f0423df68b1137f34875f6ee52f9914f904bf724"
-          test "$(jq -r .external_effects_enabled .codestra/calling-contract.lock.json)" = "false"
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SHA}"
+          test -z "$(git status --porcelain)"
+
+      - name: Enforce issue 257 contract and fail-closed types
+        run: |
+          set -Eeuo pipefail
+          lock=.codestra/calling-contract.lock.json
+          jq -e '.version == "1.0.0" and (.version | type) == "string"' "$lock" >/dev/null
+          jq -e '.sha256 == "b39cdffe56a8185c91174228f0423df68b1137f34875f6ee52f9914f904bf724" and (.sha256 | type) == "string"' "$lock" >/dev/null
+          jq -e '.authority == "appolon1908-hue/codestra-production-platform#257" and (.authority | type) == "string"' "$lock" >/dev/null
+          jq -e '.role == "operator_ui" and (.role | type) == "string"' "$lock" >/dev/null
+          jq -e '.external_effects_enabled == false and (.external_effects_enabled | type) == "boolean"' "$lock" >/dev/null
