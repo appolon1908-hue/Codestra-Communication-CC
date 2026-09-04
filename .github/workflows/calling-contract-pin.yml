@@ -5,12 +5,15 @@ on:
   push:
     branches: ["main"]
     paths: [".codestra/calling-contract.lock.json"]
-permissions: {contents: read}
+permissions:
+  contents: read
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
       - name: Enforce issue 257 contract and fail-closed default
         run: |
           test "$(jq -r .version .codestra/calling-contract.lock.json)" = "1.0.0"
