@@ -17,5 +17,5 @@ jobs:
       - name: Enforce issue 257 contract and fail-closed default
         run: |
           test "$(jq -r .version .codestra/calling-contract.lock.json)" = "1.0.0"
-          test "$(jq -r .sha256 .codestra/calling-contract.lock.json)" = "856f55ce980fe661a6a326c1a70207496f0eb3fc4bc335141e874c075b5a7e93"
+          test "$(jq -r .sha256 .codestra/calling-contract.lock.json)" = "b39cdffe56a8185c91174228f0423df68b1137f34875f6ee52f9914f904bf724"
           test "$(jq -r .external_effects_enabled .codestra/calling-contract.lock.json)" = "false"
