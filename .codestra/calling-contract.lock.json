@@ -1,0 +1,7 @@
+{
+  "version": "1.0.0",
+  "sha256": "daebae72a76b347de66318c7b83ca86703192f09ab44eb14ca3c32603251222b",
+  "authority": "appolon1908-hue/codestra-production-platform#257",
+  "role": "operator_ui",
+  "external_effects_enabled": false
+}

@@ -1,0 +1,18 @@
+name: calling-contract-pin
+on:
+  pull_request:
+    paths: [".codestra/calling-contract.lock.json"]
+  push:
+    branches: ["main"]
+    paths: [".codestra/calling-contract.lock.json"]
+permissions: {contents: read}
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce issue 257 contract and fail-closed default
+        run: |
+          test "$(jq -r .version .codestra/calling-contract.lock.json)" = "1.0.0"
+          test "$(jq -r .sha256 .codestra/calling-contract.lock.json)" = "daebae72a76b347de66318c7b83ca86703192f09ab44eb14ca3c32603251222b"
+          test "$(jq -r .external_effects_enabled .codestra/calling-contract.lock.json)" = "false"
