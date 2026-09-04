@@ -1,0 +1,13 @@
+.git
+.github
+.codestra
+__pycache__
+*.py[cod]
+.pytest_cache
+.venv
+venv
+.env
+.env.*
+tests
+migrations
+docs
