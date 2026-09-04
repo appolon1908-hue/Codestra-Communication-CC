@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "sha256": "41b7e1897bad0886fbc8a209f635df28cfd9f80ab3aadd5c04f9ae8e92ac1077",
+  "sha256": "856f55ce980fe661a6a326c1a70207496f0eb3fc4bc335141e874c075b5a7e93",
   "authority": "appolon1908-hue/codestra-production-platform#257",
   "role": "operator_ui",
   "external_effects_enabled": false
