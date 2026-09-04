@@ -10,11 +10,22 @@ permissions:
 
 jobs:
   unit-and-contract:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out exact reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove exact source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12'
           cache: pip
@@ -25,8 +36,13 @@ jobs:
       - run: python -c "from app.main import app, EXTERNAL_DELIVERY_ENABLED; assert app; assert EXTERNAL_DELIVERY_ENABLED is False"
 
   postgres-certification:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/codestra_communication_stage5
+      POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/codestra_communication_stage5
+      EXTERNAL_DELIVERY_ENABLED: 'false'
     services:
       postgres:
         image: postgres:17-alpine
@@ -41,13 +57,18 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
-    env:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/codestra_communication_stage5
-      POSTGRES_DSN: postgresql://postgres:postgres@127.0.0.1:5432/codestra_communication_stage5
-      EXTERNAL_DELIVERY_ENABLED: 'false'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out exact reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove exact source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: '3.12'
           cache: pip
@@ -55,3 +76,69 @@ jobs:
       - run: pip install -e '.[test]'
       - run: python scripts/certify_stage5_postgres.py
       - run: pytest -q -m postgres
+
+  container-build:
+    name: container-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out exact reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove exact source identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "${EXPECTED_SHA}"
+          test -z "$(git status --porcelain)"
+      - name: Resolve immutable Python base through Google mirror
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends skopeo jq
+          digest="$(skopeo inspect --format '{{.Digest}}' docker://mirror.gcr.io/library/python:3.12-slim)"
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "PYTHON_IMAGE=mirror.gcr.io/library/python:3.12-slim@${digest}" >> "${GITHUB_ENV}"
+          echo "Resolved Python base ${digest}"
+      - name: Build exact non-root image without publishing
+        run: |
+          set -Eeuo pipefail
+          docker build \
+            --pull=false \
+            --build-arg "PYTHON_IMAGE=${PYTHON_IMAGE}" \
+            --label "org.opencontainers.image.revision=${EXPECTED_SHA}" \
+            --tag "codestra-communication:${EXPECTED_SHA}" \
+            .
+          test "$(docker image inspect --format '{{.Config.User}}' "codestra-communication:${EXPECTED_SHA}")" = "10001:10001"
+          docker image inspect "codestra-communication:${EXPECTED_SHA}" >/dev/null
+      - name: Smoke-test fail-closed health and capabilities
+        run: |
+          set -Eeuo pipefail
+          name="codestra-communication-${GITHUB_RUN_ID}"
+          cleanup() { docker rm -f "${name}" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker run -d --rm \
+            --name "${name}" \
+            -p 127.0.0.1:18080:8080 \
+            -e EXTERNAL_DELIVERY_ENABLED=false \
+            -e BUSINESS_WRITES_ENABLED=false \
+            -e CODESTRA_GIT_SHA="${EXPECTED_SHA}" \
+            "codestra-communication:${EXPECTED_SHA}"
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/health >/tmp/health.json; then
+              break
+            fi
+            if [[ "${attempt}" -eq 30 ]]; then
+              docker logs "${name}"
+              exit 1
+            fi
+            sleep 1
+          done
+          jq -e '.status == "ok" and .service == "codestra-communication"' /tmp/health.json >/dev/null
+          curl --fail --silent http://127.0.0.1:18080/capabilities >/tmp/capabilities.json
+          jq -e '.external_delivery_enabled == false and .business_writes_enabled == false and .live_email_enabled == false and .live_sms_enabled == false and .live_pstn_enabled == false' /tmp/capabilities.json >/dev/null
+          test -z "$(git status --porcelain)"
