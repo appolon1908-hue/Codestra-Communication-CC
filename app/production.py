@@ -30,11 +30,19 @@ core.EXTERNAL_DELIVERY_ENABLED = _env_enabled("EXTERNAL_DELIVERY_ENABLED")
 # live channels false, with exact effective-state readback. Removing only these
 # routes preserves the rest of the canonical API and its OpenAPI contract.
 _CAPABILITY_PATHS = {"/capabilities", "/v1/communications/capabilities"}
-app.router.routes[:] = [
-    route
-    for route in app.router.routes
-    if getattr(route, "path", None) not in _CAPABILITY_PATHS
-]
+_capability_routes = {
+    route.path: route
+    for router in (core.router, app.router)
+    for route in router.routes
+    if getattr(route, "path", None) in _CAPABILITY_PATHS
+}
+# Included APIRouters can be lazy. Remove the original route from both owners
+# so request dispatch and OpenAPI use the same guarded handler.
+for router in (core.router, app.router):
+    router.routes[:] = [
+        route for route in router.routes
+        if getattr(route, "path", None) not in _CAPABILITY_PATHS
+    ]
 
 
 def _activation_public_state() -> dict[str, object]:
@@ -59,14 +67,7 @@ def _activation_public_state() -> dict[str, object]:
 
 
 def production_capabilities(request: Request = None) -> dict[str, object]:
-    """Return exact effective capability state.
-
-    ``Request`` deliberately remains the FastAPI-recognized parameter type
-    while retaining the default used by source-level tests and operator tools.
-    ``Request | None`` is not a valid dependency field in FastAPI and prevents
-    application startup before any activation gate can run.
-    """
-
+    # Keep Request recognizable to FastAPI while allowing direct readback tests.
     value = dict(_original_capabilities(request))
     activation = _activation_public_state()
     value.update(
@@ -93,18 +94,25 @@ def production_capabilities(request: Request = None) -> dict[str, object]:
     return value
 
 
-app.add_api_route(
-    "/capabilities",
-    production_capabilities,
-    methods=["GET"],
-    name="production_capabilities",
-)
-app.add_api_route(
-    "/v1/communications/capabilities",
-    production_capabilities,
-    methods=["GET"],
-    name="production_communications_capabilities",
-)
+# Preserve the public API metadata and router-level correlation dependency.
+# Only the capability computation changes in the guarded production wrapper.
+for route in _capability_routes.values():
+    app.add_api_route(
+        route.path,
+        production_capabilities,
+        methods=route.methods,
+        name=route.name,
+        operation_id=route.operation_id,
+        dependencies=route.dependencies,
+        response_model=route.response_model,
+        status_code=route.status_code,
+        tags=route.tags,
+        summary=route.summary,
+        description=route.description,
+        responses=route.responses,
+        include_in_schema=route.include_in_schema,
+    )
+app.openapi_schema = None
 
 
 @app.get("/activation/status", include_in_schema=False)

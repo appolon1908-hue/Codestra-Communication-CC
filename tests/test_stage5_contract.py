@@ -1,6 +1,7 @@
 import pytest
 
-from app.main import EXTERNAL_DELIVERY_ENABLED, TemplateRenderRequest, app, capabilities, provider_health
+from app.main import EXTERNAL_DELIVERY_ENABLED, TemplateRenderRequest, capabilities, provider_health
+from app.production import app
 
 
 def test_committed_openapi_matches_runtime():
