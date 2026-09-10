@@ -1,0 +1,57 @@
+groups:
+  - name: codestra-communication-runtime
+    rules:
+      - alert: CodestraCommunicationTargetDown
+        expr: up{job="codestra-communication"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: codestra-communication
+        annotations:
+          summary: Codestra Communication target is unavailable
+          runbook: docs/runbooks/communication-runtime.md#target-down
+      - alert: CodestraCommunicationHighServerErrors
+        expr: sum(rate(codestra_communication_http_requests_total{status_class="5xx"}[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          service: codestra-communication
+        annotations:
+          summary: Codestra Communication has sustained server errors
+          runbook: docs/runbooks/communication-runtime.md#server-errors
+      - alert: CodestraCommunicationHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(codestra_communication_http_request_duration_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels:
+          severity: warning
+          service: codestra-communication
+        annotations:
+          summary: Codestra Communication p95 latency exceeds one second
+          runbook: docs/runbooks/communication-runtime.md#latency
+      - alert: CodestraCommunicationDeliveryDeadLetter
+        expr: codestra_communication_delivery_outbox_records{state="dead_letter"} > 0
+        for: 5m
+        labels:
+          severity: critical
+          service: codestra-communication
+        annotations:
+          summary: A governed communication delivery reached dead letter
+          runbook: docs/runbooks/communication-runtime.md#delivery-dead-letter
+      - alert: CodestraCommunicationMiddlewareCircuitOpen
+        expr: codestra_communication_middleware_circuit_open == 1
+        for: 2m
+        labels:
+          severity: critical
+          service: codestra-communication
+        annotations:
+          summary: Communication-to-Middleware circuit is open
+          runbook: docs/runbooks/communication-runtime.md#middleware-circuit
+      - alert: CodestraCommunicationEventBacklog
+        expr: codestra_communication_event_outbox_depth > 100
+        for: 10m
+        labels:
+          severity: warning
+          service: codestra-communication
+        annotations:
+          summary: Communication integration-event backlog is elevated
+          runbook: docs/runbooks/communication-runtime.md#event-backlog

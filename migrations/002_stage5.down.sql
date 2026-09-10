@@ -1,2 +1,2 @@
-ALTER TABLE messages DROP COLUMN IF EXISTS request_fingerprint;
-ALTER TABLE messages DROP COLUMN IF EXISTS purpose;
+ALTER TABLE IF EXISTS messages DROP COLUMN IF EXISTS request_fingerprint;
+ALTER TABLE IF EXISTS messages DROP COLUMN IF EXISTS purpose;
