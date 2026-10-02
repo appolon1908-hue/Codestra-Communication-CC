@@ -25,3 +25,9 @@ governance:
 integration:
   middleware_v3: "optional-orchestration-boundary; not a standalone runtime dependency"
   edge_path_when_applicable: "Caddy -> Kong -> Middleware :8095"
+
+effective_lifecycle:
+  development: "development"
+  testing: "testing"
+  staging: "staging"
+  production: "production/environment"
