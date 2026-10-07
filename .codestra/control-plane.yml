@@ -1,0 +1,28 @@
+version: 1
+product: "Contact Center"
+authority:
+  development_branch: development
+  testing_branch: testing
+  staging_branch: staging
+  production_branch: production
+  governance_branch: workstation/governance-control-plane
+  ci_runner_label: codestra-contact-center
+promotion:
+  chain: [development, testing, staging, production]
+  require_exact_sha: true
+  require_clean_worktree: true
+  require_review: true
+  force_push_allowed: false
+effects:
+  production_go: false
+  live_capabilities_enabled: false
+  external_effects_enabled: false
+sections:
+  - {id: ws01-core, branch: workstation/ws01-core, status: available}
+  - {id: ws02-api, branch: workstation/ws02-api, status: available}
+  - {id: ws03-security, branch: workstation/ws03-security, status: available}
+  - {id: ws04-deployment, branch: workstation/ws04-deployment, status: available}
+  - {id: ws05-observability, branch: workstation/ws05-observability, status: available}
+  - {id: ws06-testing, branch: workstation/ws06-testing, status: available}
+  - {id: ws07-saas, branch: workstation/ws07-saas, status: available}
+  - {id: ws08-release, branch: workstation/ws08-release, status: available}
