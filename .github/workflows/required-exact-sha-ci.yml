@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 concurrency:
   group: required-exact-sha-${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.event.pull_request.head.sha }}
@@ -20,6 +21,7 @@ concurrency:
 jobs:
   exact-sha:
     name: Test exact repository SHA
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64, codestra-ci, codestra-contact-center]
     timeout-minutes: 30
     env:
@@ -90,3 +92,17 @@ jobs:
           path: ${{ runner.temp }}/exact-sha-evidence.txt
           if-no-files-found: error
           retention-days: 14
+
+
+      - name: Publish target-SHA certification status
+        if: ${{ success() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${EXPECTED_SHA}" \
+            -f state=success \
+            -f context="required-exact-sha/target" \
+            -f description="Exact-SHA certification passed" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
