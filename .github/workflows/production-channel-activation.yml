@@ -31,7 +31,7 @@ on:
         required: true
         type: string
       image_digest:
-        description: Exact sha256 OCI digest for ghcr.io/appolon1908-hue/codestra-communication
+        description: Exact sha256 OCI digest for ghcr.io/appolon1908/codestra-communication
         required: true
         type: string
       evidence_path:
@@ -209,7 +209,7 @@ jobs:
           GHCR_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          image="ghcr.io/appolon1908-hue/codestra-communication@$IMAGE_DIGEST"
+          image="ghcr.io/appolon1908/codestra-communication@$IMAGE_DIGEST"
           printf '%s' "$GHCR_TOKEN" \
             | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
           docker pull "$image"
