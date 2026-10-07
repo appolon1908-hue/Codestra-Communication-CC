@@ -1,0 +1,24 @@
+{
+  "schema_version": "codestra.governance.v3",
+  "family": "contact-center",
+  "product": "Codestra-Communication-CC",
+  "repository": "appolon1908/Codestra-Communication-CC",
+  "hierarchy": "product > section > subsection > atomic-task",
+  "promotion_chain": [
+    "subsection",
+    "section",
+    "development",
+    "testing",
+    "staging",
+    "production"
+  ],
+  "required_status": "codestra-control-plane",
+  "production": {
+    "PRODUCTION_GO": "NO",
+    "LIVE_CAPABILITIES_ENABLED": "NO",
+    "EXTERNAL_EFFECTS": "false"
+  },
+  "worktree_mode": "lazy-subsection",
+  "force_push": false,
+  "direct_protected_branch_writes": false
+}

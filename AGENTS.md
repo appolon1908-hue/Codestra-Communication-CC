@@ -1,3 +1,44 @@
+<!-- CODESTRA-GOVERNANCE-V3:BEGIN -->
+# Codestra Governed Development Contract v3
+
+This repository is a component of the **Contact Center** standalone product.
+
+## Mandatory hierarchy
+
+Product -> Section -> Subsection -> Atomic Task
+
+Promotion is only:
+
+subsection -> section -> development -> testing -> staging -> production
+
+No other promotion path is authorized.
+
+## Agent execution
+
+- One active lease per subsection.
+- Work only in the assigned subsection branch and worktree.
+- Implementation, tests, evidence, commit, and push are required; review-only output is not completion.
+- Never force-push or write directly to protected environment branches.
+- Every promotion must pass the centralized codestra-control-plane exact-SHA status plus repository CI.
+- Dirty, stale, divergent, uncertified, or dependency-incomplete work fails closed.
+- Preserve CODEOWNERS and repository-specific security and release rules.
+
+## Production safety
+
+- PRODUCTION_GO=NO
+- LIVE_CAPABILITIES_ENABLED=NO
+- EXTERNAL_EFFECTS=false
+
+Calls, SMS, email, WhatsApp, payments, publishing, credential issuance, production database writes, and production infrastructure mutation remain disabled until separately certified and explicitly approved.
+
+## Completion
+
+A subsection is complete only when applicable source, tests, contracts, migrations, security checks, clean-tree proof, remote-SHA match, CI evidence, review, and regression evidence are recorded. Certification is exact-SHA and independent of implementation.
+<!-- CODESTRA-GOVERNANCE-V3:END -->
+
+
+# Repository-specific existing instructions
+
 # Codestra Agent Governance Standard
 
 Every task belongs to Product → Section → Subsection → Atomic Task.

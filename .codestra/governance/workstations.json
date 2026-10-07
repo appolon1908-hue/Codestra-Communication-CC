@@ -1,0 +1,621 @@
+{
+  "schema_version": "codestra.workstations.v3",
+  "product": "Codestra-Communication-CC",
+  "family": "contact-center",
+  "sections": [
+    {
+      "section": "cc-01-foundation",
+      "branch": "section/cc-01-foundation",
+      "order": 1,
+      "depends_on": [],
+      "subsections": [
+        {
+          "subsection": "01-app-bootstrap",
+          "workstation_id": "codestra-communication-cc::cc-01-foundation::01-app-bootstrap",
+          "branch": "subsection/cc-01-foundation--01-app-bootstrap",
+          "parent_branch": "section/cc-01-foundation",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-01-foundation/subsections/01-app-bootstrap/repo"
+        },
+        {
+          "subsection": "02-config-errors",
+          "workstation_id": "codestra-communication-cc::cc-01-foundation::02-config-errors",
+          "branch": "subsection/cc-01-foundation--02-config-errors",
+          "parent_branch": "section/cc-01-foundation",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-01-foundation::01-app-bootstrap"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-01-foundation/subsections/02-config-errors/repo"
+        },
+        {
+          "subsection": "03-lifecycle",
+          "workstation_id": "codestra-communication-cc::cc-01-foundation::03-lifecycle",
+          "branch": "subsection/cc-01-foundation--03-lifecycle",
+          "parent_branch": "section/cc-01-foundation",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-01-foundation::02-config-errors"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-01-foundation/subsections/03-lifecycle/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-02-campaigns",
+      "branch": "section/cc-02-campaigns",
+      "order": 2,
+      "depends_on": [
+        "codestra-communication-cc::cc-01-foundation"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-campaign-model",
+          "workstation_id": "codestra-communication-cc::cc-02-campaigns::01-campaign-model",
+          "branch": "subsection/cc-02-campaigns--01-campaign-model",
+          "parent_branch": "section/cc-02-campaigns",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-02-campaigns/subsections/01-campaign-model/repo"
+        },
+        {
+          "subsection": "02-lists-statuses",
+          "workstation_id": "codestra-communication-cc::cc-02-campaigns::02-lists-statuses",
+          "branch": "subsection/cc-02-campaigns--02-lists-statuses",
+          "parent_branch": "section/cc-02-campaigns",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-02-campaigns::01-campaign-model"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-02-campaigns/subsections/02-lists-statuses/repo"
+        },
+        {
+          "subsection": "03-closer-routing",
+          "workstation_id": "codestra-communication-cc::cc-02-campaigns::03-closer-routing",
+          "branch": "subsection/cc-02-campaigns--03-closer-routing",
+          "parent_branch": "section/cc-02-campaigns",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-02-campaigns::02-lists-statuses"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-02-campaigns/subsections/03-closer-routing/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-03-agent-runtime",
+      "branch": "section/cc-03-agent-runtime",
+      "order": 3,
+      "depends_on": [
+        "codestra-communication-cc::cc-02-campaigns"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-presence",
+          "workstation_id": "codestra-communication-cc::cc-03-agent-runtime::01-presence",
+          "branch": "subsection/cc-03-agent-runtime--01-presence",
+          "parent_branch": "section/cc-03-agent-runtime",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-03-agent-runtime/subsections/01-presence/repo"
+        },
+        {
+          "subsection": "02-extensions",
+          "workstation_id": "codestra-communication-cc::cc-03-agent-runtime::02-extensions",
+          "branch": "subsection/cc-03-agent-runtime--02-extensions",
+          "parent_branch": "section/cc-03-agent-runtime",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-03-agent-runtime::01-presence"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-03-agent-runtime/subsections/02-extensions/repo"
+        },
+        {
+          "subsection": "03-permissions",
+          "workstation_id": "codestra-communication-cc::cc-03-agent-runtime::03-permissions",
+          "branch": "subsection/cc-03-agent-runtime--03-permissions",
+          "parent_branch": "section/cc-03-agent-runtime",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-03-agent-runtime::02-extensions"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-03-agent-runtime/subsections/03-permissions/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-04-control-api",
+      "branch": "section/cc-04-control-api",
+      "order": 4,
+      "depends_on": [
+        "codestra-communication-cc::cc-03-agent-runtime"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-command-api",
+          "workstation_id": "codestra-communication-cc::cc-04-control-api::01-command-api",
+          "branch": "subsection/cc-04-control-api--01-command-api",
+          "parent_branch": "section/cc-04-control-api",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-04-control-api/subsections/01-command-api/repo"
+        },
+        {
+          "subsection": "02-events-webhooks",
+          "workstation_id": "codestra-communication-cc::cc-04-control-api::02-events-webhooks",
+          "branch": "subsection/cc-04-control-api--02-events-webhooks",
+          "parent_branch": "section/cc-04-control-api",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-04-control-api::01-command-api"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-04-control-api/subsections/02-events-webhooks/repo"
+        },
+        {
+          "subsection": "03-openapi-postman",
+          "workstation_id": "codestra-communication-cc::cc-04-control-api::03-openapi-postman",
+          "branch": "subsection/cc-04-control-api--03-openapi-postman",
+          "parent_branch": "section/cc-04-control-api",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-04-control-api::02-events-webhooks"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-04-control-api/subsections/03-openapi-postman/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-05-integrations",
+      "branch": "section/cc-05-integrations",
+      "order": 5,
+      "depends_on": [
+        "codestra-communication-cc::cc-04-control-api"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-middleware",
+          "workstation_id": "codestra-communication-cc::cc-05-integrations::01-middleware",
+          "branch": "subsection/cc-05-integrations--01-middleware",
+          "parent_branch": "section/cc-05-integrations",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-05-integrations/subsections/01-middleware/repo"
+        },
+        {
+          "subsection": "02-odoo",
+          "workstation_id": "codestra-communication-cc::cc-05-integrations::02-odoo",
+          "branch": "subsection/cc-05-integrations--02-odoo",
+          "parent_branch": "section/cc-05-integrations",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-05-integrations::01-middleware"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-05-integrations/subsections/02-odoo/repo"
+        },
+        {
+          "subsection": "03-n8n",
+          "workstation_id": "codestra-communication-cc::cc-05-integrations::03-n8n",
+          "branch": "subsection/cc-05-integrations--03-n8n",
+          "parent_branch": "section/cc-05-integrations",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-05-integrations::02-odoo"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-05-integrations/subsections/03-n8n/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-06-tenancy",
+      "branch": "section/cc-06-tenancy",
+      "order": 6,
+      "depends_on": [
+        "codestra-communication-cc::cc-05-integrations"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-tenant-binding",
+          "workstation_id": "codestra-communication-cc::cc-06-tenancy::01-tenant-binding",
+          "branch": "subsection/cc-06-tenancy--01-tenant-binding",
+          "parent_branch": "section/cc-06-tenancy",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-06-tenancy/subsections/01-tenant-binding/repo"
+        },
+        {
+          "subsection": "02-rbac-quotas",
+          "workstation_id": "codestra-communication-cc::cc-06-tenancy::02-rbac-quotas",
+          "branch": "subsection/cc-06-tenancy--02-rbac-quotas",
+          "parent_branch": "section/cc-06-tenancy",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-06-tenancy::01-tenant-binding"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-06-tenancy/subsections/02-rbac-quotas/repo"
+        },
+        {
+          "subsection": "03-audit",
+          "workstation_id": "codestra-communication-cc::cc-06-tenancy::03-audit",
+          "branch": "subsection/cc-06-tenancy--03-audit",
+          "parent_branch": "section/cc-06-tenancy",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-06-tenancy::02-rbac-quotas"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-06-tenancy/subsections/03-audit/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-07-observability",
+      "branch": "section/cc-07-observability",
+      "order": 7,
+      "depends_on": [
+        "codestra-communication-cc::cc-06-tenancy"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-metrics",
+          "workstation_id": "codestra-communication-cc::cc-07-observability::01-metrics",
+          "branch": "subsection/cc-07-observability--01-metrics",
+          "parent_branch": "section/cc-07-observability",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-07-observability/subsections/01-metrics/repo"
+        },
+        {
+          "subsection": "02-logs-traces",
+          "workstation_id": "codestra-communication-cc::cc-07-observability::02-logs-traces",
+          "branch": "subsection/cc-07-observability--02-logs-traces",
+          "parent_branch": "section/cc-07-observability",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-07-observability::01-metrics"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-07-observability/subsections/02-logs-traces/repo"
+        },
+        {
+          "subsection": "03-slo-alerts",
+          "workstation_id": "codestra-communication-cc::cc-07-observability::03-slo-alerts",
+          "branch": "subsection/cc-07-observability--03-slo-alerts",
+          "parent_branch": "section/cc-07-observability",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-07-observability::02-logs-traces"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-07-observability/subsections/03-slo-alerts/repo"
+        }
+      ]
+    },
+    {
+      "section": "cc-08-release",
+      "branch": "section/cc-08-release",
+      "order": 8,
+      "depends_on": [
+        "codestra-communication-cc::cc-07-observability"
+      ],
+      "subsections": [
+        {
+          "subsection": "01-testing",
+          "workstation_id": "codestra-communication-cc::cc-08-release::01-testing",
+          "branch": "subsection/cc-08-release--01-testing",
+          "parent_branch": "section/cc-08-release",
+          "order": 1,
+          "depends_on": [],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-08-release/subsections/01-testing/repo"
+        },
+        {
+          "subsection": "02-performance-dr",
+          "workstation_id": "codestra-communication-cc::cc-08-release::02-performance-dr",
+          "branch": "subsection/cc-08-release--02-performance-dr",
+          "parent_branch": "section/cc-08-release",
+          "order": 2,
+          "depends_on": [
+            "codestra-communication-cc::cc-08-release::01-testing"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-08-release/subsections/02-performance-dr/repo"
+        },
+        {
+          "subsection": "03-certification-promotion",
+          "workstation_id": "codestra-communication-cc::cc-08-release::03-certification-promotion",
+          "branch": "subsection/cc-08-release--03-certification-promotion",
+          "parent_branch": "section/cc-08-release",
+          "order": 3,
+          "depends_on": [
+            "codestra-communication-cc::cc-08-release::02-performance-dr"
+          ],
+          "required_gates": [
+            "lint",
+            "unit",
+            "integration",
+            "contract",
+            "security",
+            "clean_tree",
+            "remote_sha_match",
+            "ci_exact_sha",
+            "review",
+            "regression"
+          ],
+          "worktree": "/srv/codestra/workstations/Codestra-Communication-CC/sections/cc-08-release/subsections/03-certification-promotion/repo"
+        }
+      ]
+    }
+  ]
+}
