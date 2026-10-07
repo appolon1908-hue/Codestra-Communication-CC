@@ -1,0 +1,69 @@
+name: Required exact-SHA CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Full repository commit SHA to certify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: required-exact-sha-${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  exact-sha:
+    name: Test exact repository SHA
+    runs-on: [self-hosted, Linux, X64, codestra-ci, codestra-contact-center]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.event.pull_request.head.sha }}
+    steps:
+      - name: Check out exact candidate SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prove exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Reject operation residue
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .git/MERGE_HEAD
+          test ! -e .git/CHERRY_PICK_HEAD
+          test ! -d .git/rebase-merge
+          test ! -d .git/rebase-apply
+      - name: Validate repository integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git fsck --no-progress
+      - name: Record exact-SHA evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "runner=${RUNNER_NAME}"
+            echo "architecture=${RUNNER_ARCH}"
+            echo "os=${RUNNER_OS}"
+          } | tee exact-sha-evidence.txt
+      - name: Upload exact-SHA evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exact-sha-evidence-${{ github.run_id }}
+          path: exact-sha-evidence.txt
+          if-no-files-found: error
+          retention-days: 14
