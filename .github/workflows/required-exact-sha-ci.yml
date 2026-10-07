@@ -1,0 +1,108 @@
+name: Required exact-SHA CI
+
+on:
+  pull_request:
+    branches: [development]
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Full repository commit SHA to certify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: required-exact-sha-${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  exact-sha:
+    name: Test exact repository SHA
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, codestra-ci, codestra-contact-center]
+    timeout-minutes: 30
+    env:
+      EVENT_NAME: ${{ github.event_name }}
+      EXPECTED_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.target_sha || github.event.pull_request.head.sha }}
+      BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
+    steps:
+      - name: Enforce certification lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            test "${GITHUB_REF_NAME}" = "development"
+          fi
+
+      - name: Check out exact candidate SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.EXPECTED_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Reject merge, rebase, or cherry-pick residue
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e .git/MERGE_HEAD
+          test ! -e .git/CHERRY_PICK_HEAD
+          test ! -d .git/rebase-merge
+          test ! -d .git/rebase-apply
+
+      - name: Validate committed candidate diff and repository integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            test -n "$BASE_SHA"
+            git diff --check "$BASE_SHA" "$EXPECTED_SHA"
+          else
+            git diff --check "$EXPECTED_SHA^" "$EXPECTED_SHA"
+          fi
+          git fsck --no-progress
+
+      - name: Record exact-SHA evidence in runner-controlled storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/exact-sha-evidence.txt"
+          umask 077
+          {
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "sha=$(git rev-parse HEAD)"
+            echo "runner=${RUNNER_NAME}"
+            echo "architecture=${RUNNER_ARCH}"
+            echo "os=${RUNNER_OS}"
+          } > "$evidence"
+
+      - name: Upload exact-SHA evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exact-sha-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/exact-sha-evidence.txt
+          if-no-files-found: error
+          retention-days: 14
+
+
+      - name: Publish target-SHA certification status
+        if: ${{ success() }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${EXPECTED_SHA}" \
+            -f state=success \
+            -f context="required-exact-sha/target" \
+            -f description="Exact-SHA certification passed" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
