@@ -37,3 +37,28 @@ jobs:
           if len(sections) != 8:
               raise SystemExit("expected 8 governed workstation sections")
           print("hierarchy governance PASS")
+
+
+  codestra-control-plane:
+    name: codestra-control-plane
+    needs: hierarchy-governance
+    runs-on: ubuntu-24.04
+    if: ${{ always() }}
+    steps:
+      - name: Preserve required control-plane context
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.hierarchy-governance.result }}" = "success"
+
+  codestra-slash-control-plane:
+    name: codestra/control-plane
+    needs: hierarchy-governance
+    runs-on: ubuntu-24.04
+    if: ${{ always() }}
+    steps:
+      - name: Preserve legacy required control-plane context
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.hierarchy-governance.result }}" = "success"
